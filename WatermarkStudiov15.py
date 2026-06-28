@@ -667,6 +667,326 @@ def _has_dynamic_wm(cfg):
     return bool(cfg.get("enable_center_fade") or cfg.get("enable_dvd")
                 or cfg.get("enable_moving") or cfg.get("enable_bouncing"))
 
+def _is_fix_anh_static(cfg):
+    """Preset Fix anh: WM tinh (chu giua + 4 goc), khong phai HS/dynamic."""
+    return not cfg.get("hs_mode") and not _has_dynamic_wm(cfg)
+
+_PROBE_CACHE = {}
+
+def _probe_file_cached(ffprobe_p, path):
+    """Cache duration / W-H / rotation — moi file chi ffprobe 1 lan / batch."""
+    key = (ffprobe_p, os.path.normpath(path))
+    if key not in _PROBE_CACHE:
+        _PROBE_CACHE[key] = {
+            "duration": _get_duration(ffprobe_p, path),
+            "wh":         _probe_wh(ffprobe_p, path),
+            "rotation":   _get_rotation(ffprobe_p, path),
+        }
+    return _PROBE_CACHE[key]
+
+def _parse_drawtext_color(color):
+    """'white' / 'white@0.5' / '#rrggbb' -> (r,g,b, alpha 0-255)."""
+    c = (color or "white").strip()
+    if "@" in c:
+        base, alpha = c.split("@", 1)
+        try:
+            a = max(0.0, min(1.0, float(alpha)))
+        except ValueError:
+            a = 1.0
+    else:
+        base, a = c, 1.0
+    if base.startswith("#"):
+        r, g, b = _hex_to_rgb(base)
+    else:
+        r = g = b = 255
+    return r, g, b, int(a * 255)
+
+def _load_pil_font(font_file, size):
+    if not PIL_OK:
+        return None
+    paths = [font_file, _default_font()]
+    for p in paths:
+        if p and os.path.isfile(p):
+            try:
+                return ImageFont.truetype(p, int(size))
+            except Exception:
+                pass
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+def _bake_text_png(text, font_file, size, color, opacity, cache_dir, tag):
+    """Render 1 dong chu tinh ra PNG RGBA (alpha bake san). Tra path hoac None."""
+    if not PIL_OK or not (text or "").strip():
+        return None
+    font = _load_pil_font(font_file, size)
+    if font is None:
+        return None
+    r, g, b, ca = _parse_drawtext_color(color)
+    alpha = max(0, min(255, int(ca * float(opacity))))
+    if alpha <= 0:
+        return None
+    key = hashlib.md5(f"{tag}|{text}|{size}|{font_file}|{r}{g}{b}|{alpha}".encode()).hexdigest()[:12]
+    path = os.path.join(cache_dir, f"wm_txt_{tag}_{key}.png")
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        return path
+    os.makedirs(cache_dir, exist_ok=True)
+    tmp = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tmp)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = max(1, bbox[2] - bbox[0])
+    th = max(1, bbox[3] - bbox[1])
+    pad = 2
+    img = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=(r, g, b, alpha))
+    img.save(path, "PNG")
+    return path
+
+def _static_text_overlay_defs(cfg):
+    """Cac lop chu tinh (Fix anh) can bake sang PNG de overlay_cuda."""
+    layers = []
+    if cfg.get("enable_center") and cfg.get("center_text", "").strip():
+        layers.append({
+            "tag": "center", "text": cfg["center_text"].strip(),
+            "size": cfg.get("center_size", 25), "color": "white",
+            "opacity": cfg.get("center_opacity", 0.15),
+            "x": "(main_w-overlay_w)/4", "y": "(main_h-overlay_h)/2",
+        })
+    bl = (cfg.get("text_bottom_left") or "").strip()
+    if bl:
+        layers.append({
+            "tag": "bl", "text": bl,
+            "size": cfg.get("bottom_left_size", 22),
+            "color": cfg.get("bottom_left_color", "white"), "opacity": 1.0,
+            "x": "10", "y": "main_h-overlay_h-10",
+        })
+    tr = (cfg.get("text_top_right") or "").strip()
+    if tr:
+        layers.append({
+            "tag": "tr", "text": tr,
+            "size": cfg.get("top_right_size", 22),
+            "color": cfg.get("top_right_color", "white"), "opacity": 1.0,
+            "x": "main_w-overlay_w-10", "y": "10",
+        })
+    return layers
+
+def _prepare_static_wm(cfg, cache_dir):
+    """Fix anh: danh dau PIL san sang (composite WM se render theo tung do phan giai)."""
+    cfg["_static_text_baked"] = False
+    if not _is_fix_anh_static(cfg):
+        return False
+    if not PIL_OK:
+        return False
+    cfg["_static_text_baked"] = True
+    return True
+
+def _build_fast_logo_list(cfg):
+    """Logo PNG + chu tinh da bake (Fix anh) cho overlay_cuda."""
+    mx = str(cfg.get("logo_margin_x", 15))
+    my = str(cfg.get("logo_margin_y", 15))
+    logo_list = []
+    if os.path.isfile(cfg.get("logo_image", "")):
+        logo_list.append((
+            cfg["logo_image"],
+            cfg.get("logo_scale_w", 160),
+            cfg.get("logo_opacity", 0.7),
+            mx, my,
+        ))
+
+    def _cx(corner):
+        return str(cfg.get(f"logo_{corner}_x", int(mx)))
+
+    def _cy(corner):
+        return str(cfg.get(f"logo_{corner}_y", int(my)))
+
+    corner_defs = [
+        ("enable_tl", "logo_tl", "logo_tl_w", "logo_tl_op", _cx("tl"), _cy("tl")),
+        ("enable_tr", "logo_tr", "logo_tr_w", "logo_tr_op",
+         f"main_w-overlay_w-{_cx('tr')}", _cy("tr")),
+        ("enable_bl", "logo_bl", "logo_bl_w", "logo_bl_op", _cx("bl"),
+         f"main_h-overlay_h-{_cy('bl')}"),
+        ("enable_br", "logo_br", "logo_br_w", "logo_br_op",
+         f"main_w-overlay_w-{_cx('br')}", f"main_h-overlay_h-{_cy('br')}"),
+    ]
+    for en_k, p_k, w_k, op_k, ox, oy in corner_defs:
+        if cfg.get(en_k) and os.path.isfile(cfg.get(p_k, "")):
+            logo_list.append((cfg[p_k], cfg.get(w_k, 120), cfg.get(op_k, 0.7), ox, oy))
+
+    if cfg.get("_static_text_baked"):
+        cache_dir = cfg.get("_wm_bake_cache") or tempfile.gettempdir()
+        font = cfg.get("font_file", _default_font())
+        for d in _static_text_overlay_defs(cfg):
+            p = _bake_text_png(d["text"], font, d["size"], d["color"],
+                               d["opacity"], cache_dir, d["tag"])
+            if p:
+                # lw=None: PNG da dung kich thuoc, alpha bake san -> aa=1
+                logo_list.append((p, None, 1.0, d["x"], d["y"]))
+
+    return logo_list
+
+_COMPOSITE_DIM_CACHE = {}
+
+def _dims_after_rotation(w, h, rotation):
+    rot = int(rotation or 0)
+    if rot in (-90, 270, 90, -270):
+        return h, w
+    return w, h
+
+def _wm_composite_hash(cfg, kind):
+    """Hash cau hinh WM de cache composite theo kich thuoc."""
+    keys = LOGO_OPTION_KEYS + [
+        "logo_image", "logo_scale_w", "logo_opacity", "logo_margin_x", "logo_margin_y",
+        "text_bottom_left", "bottom_left_size", "bottom_left_color",
+        "text_top_right", "top_right_size", "top_right_color",
+        "enable_tl", "enable_tr", "enable_bl", "enable_br",
+        "logo_tl", "logo_tr", "logo_bl", "logo_br",
+        "logo_tl_w", "logo_tr_w", "logo_bl_w", "logo_br_w",
+        "logo_tl_op", "logo_tr_op", "logo_bl_op", "logo_br_op",
+        "logo_tl_x", "logo_tr_x", "logo_bl_x", "logo_br_x",
+        "logo_tl_y", "logo_tr_y", "logo_bl_y", "logo_br_y",
+    ]
+    blob = json.dumps({k: cfg.get(k) for k in keys if k in cfg or cfg.get(k) is not None},
+                      sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.md5(f"{kind}|{blob}".encode()).hexdigest()[:12]
+
+def _pil_resize_logo(img, target_w):
+    w0, h0 = img.size
+    if w0 <= 0:
+        return img
+    nw = max(1, int(target_w))
+    nh = max(1, int(h0 * nw / w0))
+    if (nw, nh) == (w0, h0):
+        return img
+    return img.resize((nw, nh), Image.Resampling.LANCZOS)
+
+def _pil_set_opacity(img, opacity):
+    op = float(opacity)
+    if op >= 0.999:
+        return img
+    r, g, b, a = img.split()
+    a = a.point(lambda x: int(x * op))
+    return Image.merge("RGBA", (r, g, b, a))
+
+def _paste_logo_file(canvas, path, scale_w, opacity, x, y):
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        img = Image.open(path).convert("RGBA")
+        img = _pil_resize_logo(img, scale_w)
+        img = _pil_set_opacity(img, opacity)
+        canvas.paste(img, (int(x), int(y)), img)
+    except Exception:
+        pass
+
+def _render_wm_composite(cfg, width, height, cache_dir, kind):
+    """Gop WM tinh thanh 1 PNG full-frame. kind='logo' | 'text'."""
+    if not PIL_OK or width <= 0 or height <= 0:
+        return None
+    width  = int(width)  - (int(width)  % 2)
+    height = int(height) - (int(height) % 2)
+    tag = _wm_composite_hash(cfg, kind)
+    path = os.path.join(cache_dir, f"wm_comp_{kind}_{width}x{height}_{tag}.png")
+    if os.path.isfile(path) and os.path.getsize(path) > 100:
+        return path
+    os.makedirs(cache_dir, exist_ok=True)
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    mx = int(cfg.get("logo_margin_x", 15))
+    my = int(cfg.get("logo_margin_y", 15))
+    font_file = cfg.get("font_file", _default_font())
+
+    if kind == "logo":
+        _paste_logo_file(canvas, cfg.get("logo_image"), cfg.get("logo_scale_w", 160),
+                         cfg.get("logo_opacity", 0.7), mx, my)
+        corners = [
+            ("tl", "logo_tl", "logo_tl_w", "logo_tl_op", "logo_tl_x", "logo_tl_y"),
+            ("tr", "logo_tr", "logo_tr_w", "logo_tr_op", "logo_tr_x", "logo_tr_y"),
+            ("bl", "logo_bl", "logo_bl_w", "logo_bl_op", "logo_bl_x", "logo_bl_y"),
+            ("br", "logo_br", "logo_br_w", "logo_br_op", "logo_br_x", "logo_br_y"),
+        ]
+        for en, pk, wk, ok, xk, yk in corners:
+            if not cfg.get(f"enable_{en}") or not os.path.isfile(cfg.get(pk, "")):
+                continue
+            lw = int(cfg.get(wk, 120))
+            lx = int(cfg.get(xk, mx))
+            ly = int(cfg.get(yk, my))
+            try:
+                tmp = Image.open(cfg[pk]).convert("RGBA")
+                tmp = _pil_resize_logo(tmp, lw)
+                tw, th = tmp.size
+            except Exception:
+                continue
+            if en == "tr":
+                lx = width - tw - lx
+            elif en == "bl":
+                ly = height - th - ly
+            elif en == "br":
+                lx = width - tw - lx
+                ly = height - th - ly
+            _paste_logo_file(canvas, cfg[pk], lw, cfg.get(ok, 0.7), lx, ly)
+
+    elif kind == "text":
+        draw = ImageDraw.Draw(canvas)
+        if cfg.get("enable_center") and cfg.get("center_text", "").strip():
+            txt = cfg["center_text"].strip()
+            font = _load_pil_font(font_file, cfg.get("center_size", 25))
+            if font:
+                bbox = draw.textbbox((0, 0), txt, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                r, g, b, ca = _parse_drawtext_color("white")
+                alpha = int(ca * float(cfg.get("center_opacity", 0.15)))
+                draw.text(((width - tw) // 4, (height - th) // 2), txt, font=font,
+                          fill=(r, g, b, alpha))
+        bl = (cfg.get("text_bottom_left") or "").strip()
+        if bl:
+            font = _load_pil_font(font_file, cfg.get("bottom_left_size", 22))
+            if font:
+                bbox = draw.textbbox((0, 0), bl, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                r, g, b, ca = _parse_drawtext_color(cfg.get("bottom_left_color", "white"))
+                draw.text((10, height - th - 10), bl, font=font, fill=(r, g, b, ca))
+        tr = (cfg.get("text_top_right") or "").strip()
+        if tr:
+            font = _load_pil_font(font_file, cfg.get("top_right_size", 22))
+            if font:
+                bbox = draw.textbbox((0, 0), tr, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                r, g, b, ca = _parse_drawtext_color(cfg.get("top_right_color", "white"))
+                draw.text((width - tw - 10, 10), tr, font=font, fill=(r, g, b, ca))
+
+    if canvas.getbbox() is None:
+        return None
+    canvas.save(path, "PNG", optimize=True)
+    return path
+
+def _get_wm_composites(cfg, width, height, cache_dir):
+    """Cache composite logo + text theo (w,h) — Fix anh dung 1-2 overlay thay vi 5-6."""
+    global _COMPOSITE_DIM_CACHE
+    width, height = int(width), int(height)
+    key = (width, height, _wm_composite_hash(cfg, "logo"), _wm_composite_hash(cfg, "text"))
+    if key in _COMPOSITE_DIM_CACHE:
+        return _COMPOSITE_DIM_CACHE[key]
+    logo_p = _render_wm_composite(cfg, width, height, cache_dir, "logo")
+    text_p = _render_wm_composite(cfg, width, height, cache_dir, "text")
+    result = {"logo": logo_p, "text": text_p}
+    _COMPOSITE_DIM_CACHE[key] = result
+    return result
+
+def _prepare_composite_wm(cfg, width, height, cache_dir):
+    """Chuan bi composite WM cho 1 do phan giai. Tra so overlay (0-2)."""
+    if not _is_fix_anh_static(cfg) or not PIL_OK:
+        cfg["_use_composite"] = False
+        return 0
+    comps = _get_wm_composites(cfg, width, height, cache_dir)
+    cfg["_composite_logo"] = comps["logo"]
+    cfg["_composite_text"] = comps["text"]
+    cfg["_vid_w"] = width
+    cfg["_vid_h"] = height
+    n = int(bool(comps["logo"])) + int(bool(comps["text"]))
+    cfg["_use_composite"] = n > 0
+    return n
+
 def _audio_args(norm_audio):
     """Chuan hoa audio sang AAC 48k stereo khi:
       - enable_outro=True  (de ghep concat khop codec)
@@ -713,67 +1033,105 @@ def build_video_cmd(cfg, inp, outp, fc, trim=None, dur_limit=None, norm_audio=Fa
 def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_audio=False, mode=None, rotation=0):
     """Pipeline overlay logo PNG -> NVENC.
 
-    PIPELINE A (mac dinh, ~40x):
-        CPU decode -> format=yuv420p -> hwupload [video]
-        logo PNG   -> format=yuva420p -> hwupload [logo]
-        overlay_cuda -> NVENC
-    Giu alpha PNG dung, kich thuoc video chinh xac (khong bi pad).
-    Fallback sang PIPELINE B neu co center text (drawtext la CPU filter).
-
-    PIPELINE B (~13x):
-        CPU overlay + NVENC. Dung khi co center text.
+    Fix anh ULTRA (~50-80x): composite WM full-frame -> 1-2 overlay_cuda.
+    Fallback: nhieu overlay rieng le hoac Pipeline B (HS).
     """
     ss     = ["-ss", str(trim)] if trim and trim > 0 else []
     t_args = ["-t", str(dur_limit)] if dur_limit is not None else []
     gpu_w    = max(1, int(cfg.get("gpu_workers", cfg.get("max_workers", 2)) or 2))
-    surfaces = max(4, 32 // gpu_w)
-    mx  = str(cfg.get("logo_margin_x", 15))
-    my  = str(cfg.get("logo_margin_y", 15))
+    surfaces = max(8, 32 // gpu_w)
     et  = cfg.get("enable_time", 0)
-    # overlay_cuda khong ho tro enable expression.
-    # Dung tpad de pad logo voi start_duration=et giay trong suot (alpha=0).
-    # Hoat dong dung voi ca split_parts vi tpad tinh tuong doi voi dau segment.
     et_pad = f",tpad=start_duration={et}:start_mode=add:color=black@0" if et and et > 0 else ""
 
-    # Danh sach logo: (path, scale_w, opacity, x_expr, y_expr)
-    logo_list = []
-    if os.path.isfile(cfg.get("logo_image", "")):
-        logo_list.append((
-            cfg["logo_image"],
-            cfg.get("logo_scale_w", 160),
-            cfg.get("logo_opacity", 0.7),
-            mx, my
-        ))
-    def _cx(corner): return str(cfg.get(f"logo_{corner}_x", int(mx)))
-    def _cy(corner): return str(cfg.get(f"logo_{corner}_y", int(my)))
-    corner_defs = [
-        ("enable_tl","logo_tl","logo_tl_w","logo_tl_op", _cx("tl"),                              _cy("tl")),
-        ("enable_tr","logo_tr","logo_tr_w","logo_tr_op", f"main_w-overlay_w-{_cx('tr')}",        _cy("tr")),
-        ("enable_bl","logo_bl","logo_bl_w","logo_bl_op", _cx("bl"),                              f"main_h-overlay_h-{_cy('bl')}"),
-        ("enable_br","logo_br","logo_br_w","logo_br_op", f"main_w-overlay_w-{_cx('br')}",        f"main_h-overlay_h-{_cy('br')}"),
-    ]
-    for en_k, p_k, w_k, op_k, ox, oy in corner_defs:
-        if cfg.get(en_k) and os.path.isfile(cfg.get(p_k, "")):
-            logo_list.append((cfg[p_k], cfg.get(w_k, 120), cfg.get(op_k, 0.7), ox, oy))
-
     has_center_text = cfg.get("enable_center") and cfg.get("center_text", "").strip()
+    use_cuda = not has_center_text or cfg.get("_static_text_baked")
+    rot = int(rotation or 0)
+
+    # ── ULTRA: 1-2 overlay_cuda voi composite full-frame (Fix anh) ──
+    if use_cuda and cfg.get("_use_composite"):
+        vid_w = int(cfg.get("_vid_w") or 0)
+        vid_h = int(cfg.get("_vid_h") or 0)
+        overlays = []
+        if cfg.get("_composite_logo"):
+            overlays.append((cfg["_composite_logo"], False))
+        if cfg.get("_composite_text"):
+            overlays.append((cfg["_composite_text"], bool(et and et > 0)))
+
+        extra_inputs = []
+        fc_parts     = []
+        stream_in    = "[0:v]"
+
+        if rot in (-90, 270):
+            xpose = "transpose=1,"
+        elif rot in (90, -270):
+            xpose = "transpose=2,"
+        elif rot in (180, -180):
+            xpose = "transpose=1,transpose=1,"
+        else:
+            xpose = ""
+
+        # NVDEC -> cuda frame truc tiep (crop fix width alignment 720->736)
+        if rot == 0 and vid_w > 0 and vid_h > 0:
+            fc_parts.append(f"[0:v]crop={vid_w}:{vid_h}[vcrop]")
+            stream_in = "[vcrop]"
+        elif xpose:
+            fc_parts.append(f"[0:v]{xpose}format=yuv420p,hwupload[base]")
+            stream_in = "[base]"
+        else:
+            fc_parts.append(f"[0:v]format=yuv420p,hwupload[base]")
+            stream_in = "[base]"
+
+        for i, (cpath, tpad) in enumerate(overlays):
+            idx = i + 1
+            lbl = f"wm{i}"
+            out = f"v{i}"
+            extra_inputs += ["-i", cpath]
+            delay = et_pad if tpad else ""
+            fc_parts.append(
+                f"[{idx}:v]format=rgba{delay},format=yuva420p,hwupload[{lbl}]"
+            )
+            fc_parts.append(
+                f"{stream_in}[{lbl}]overlay_cuda=x=0:y=0[{out}]"
+            )
+            stream_in = f"[{out}]"
+
+        hw_in = ["-hwaccel", "cuda"]
+        if rot == 0:
+            hw_in += ["-hwaccel_output_format", "cuda", "-extra_hw_frames", "16"]
+
+        nvenc_extra = ["-bf", "0", "-spatial_aq", "0", "-temporal_aq", "0"]
+
+        return [
+            cfg["ffmpeg_path"], "-hide_banner",
+            "-init_hw_device", "cuda=gpu:0",
+            "-filter_hw_device", "gpu",
+            *ss,
+            *hw_in,
+            "-i", inp,
+            *extra_inputs,
+            "-filter_complex", ";".join(fc_parts),
+            "-map", stream_in,
+            "-map", "0:a:0?",
+            *_audio_args(norm_audio),
+            "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
+            "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
+            *nvenc_extra,
+            "-surfaces", str(surfaces),
+            "-gpu", "0",
+            *t_args,
+            "-movflags", "+faststart", "-y", outp,
+        ]
+
+    logo_list = _build_fast_logo_list(cfg)
     extra_inputs = []
     fc_parts     = []
 
-    if not has_center_text:
+    if use_cuda:
         # ============================================================
         # PIPELINE A: overlay_cuda voi alpha PNG (~40x)
-        #
-        # Key insight: KHONG dung -hwaccel_output_format cuda.
-        # CPU decode -> format=yuv420p (khong bi pad width) -> hwupload.
-        # Logo: scale -> colorchannelmixer (opacity) -> tpad (enable_time delay)
-        #       -> format=yuva420p -> hwupload.
-        # overlay_cuda nhan yuv420p + yuva420p -> alpha blend dung.
-        # NVENC nhan cuda frame truc tiep tu overlay_cuda.
         # ============================================================
         stream_in = "[0:v]"
 
-        # Rotation: transpose CPU truoc hwupload (khong dung -autorotate vi anh huong ca logo input)
         rot = int(rotation or 0)
         if rot in (-90, 270):
             xpose = "transpose=1,"
@@ -784,7 +1142,6 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
         else:
             xpose = ""
 
-        # Video main: CPU decode -> (transpose) -> yuv420p -> hwupload
         fc_parts.append(f"[0:v]{xpose}format=yuv420p,hwupload[base]")
         stream_in = "[base]"
 
@@ -793,11 +1150,13 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
             lbl = f"lg{i}"
             out = f"v{i}"
             extra_inputs += ["-i", lpath]
-            # Logo: scale + opacity + tpad delay + yuva420p + hwupload
+            scale = f"scale={lw}:-1," if lw else ""
+            # Logo PNG hien ngay; chu bake PNG delay theo enable_time (Fix anh)
+            delay = et_pad if lw is None else ""
             fc_parts.append(
-                f"[{idx}:v]scale={lw}:-1,format=rgba,"
+                f"[{idx}:v]{scale}format=rgba,"
                 f"colorchannelmixer=aa={lop}"
-                f"{et_pad},"
+                f"{delay},"
                 f"format=yuva420p,hwupload[{lbl}]"
             )
             fc_parts.append(
@@ -806,7 +1165,6 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
             stream_in = f"[{out}]"
 
         if not logo_list:
-            # Khong co logo nao — van encode GPU, van xu ly rotation
             fc_parts = [f"[0:v]{xpose}format=yuv420p,hwupload[base]"]
             stream_in = "[base]"
 
@@ -815,6 +1173,7 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
             "-init_hw_device", "cuda=gpu:0",
             "-filter_hw_device", "gpu",
             *ss,
+            "-hwaccel", "cuda",
             "-i", inp,
             *extra_inputs,
             "-filter_complex", ";".join(fc_parts),
@@ -831,12 +1190,13 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
 
     else:
         # ============================================================
-        # PIPELINE B: CPU overlay + NVENC (~13x)
-        # Dung khi co center text (drawtext la CPU filter,
-        # khong chay duoc tren cuda frame).
+        # PIPELINE B: CPU overlay + NVENC (~13x) — HS / bake that bai
         # ============================================================
         stream_in = "[0:v]"
-        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
+        ec = f":enable='gte(t,{et})'" if et and et > 0 else ""
+        # Chi logo PNG goc (khong co chu bake)
+        logo_only = [(p, lw, lop, ox, oy) for p, lw, lop, ox, oy in logo_list if lw is not None]
+        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_only):
             idx = i + 1
             lbl = f"lg{i}"
             out = f"v{i}"
@@ -949,7 +1309,8 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
     # (truoc day mac dinh 600s -> video >10 phut encode bi cat con tieng).
     _seg = dur_limit
     if _seg is None:
-        _d = _get_duration(ffprobe_p, inp)
+        meta = _probe_file_cached(ffprobe_p, inp)
+        _d = meta["duration"]
         _seg = (_d - (trim or 0)) if _d else None
     enc_to = int(max(600, (_seg or 0) * 6 + 180))   # tran thoi gian, chi kill khi treo that
 
@@ -971,14 +1332,17 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
         return False, False, reason
 
     # --- GPU worker: fast mode (overlay logo PNG goc truc tiep + NVENC) ---
-    # v7.3: bo render_wm_template, build_fast_cmd tu lay logo PNG tu cfg.
-    # HS preset co dynamic WM (DVD/bounce) -> fallback drawtext CPU tu dong.
-    want_fast = (not _has_dynamic_wm(cfg) and cfg.get("_fast_ok", True))
+    # Fix anh: chu tinh bake PNG -> overlay_cuda (~40x). HS/dynamic -> drawtext CPU.
+    want_fast = (_is_fix_anh_static(cfg) and cfg.get("_fast_ok", True))
     last_err = ""
     if want_fast:
-        w, h, pix = _probe_wh(ffprobe_p, inp)
+        meta = _probe_file_cached(ffprobe_p, inp)
+        w, h, pix = meta["wh"]
         if w and h and pix not in TEN_BIT:
-            rot = _get_rotation(ffprobe_p, inp)
+            rot = meta["rotation"]
+            rw, rh = _dims_after_rotation(w, h, rot)
+            cache_dir = cfg.get("_wm_bake_cache") or tempfile.gettempdir()
+            _prepare_composite_wm(cfg, rw, rh, cache_dir)
             cmd = build_fast_cmd(cfg, inp, outp, None, trim, dur_limit, norm_audio=norm_a, rotation=rot)
             rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
             low = stderr_txt.lower()
@@ -986,7 +1350,21 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
                    "error reinitializing","not implemented",
                    "error while filtering","no such filter")
             if rc == 0 and _is_valid(outp, min_kb) and not any(b in low for b in bad):
+                if cfg.get("_use_composite"):
+                    n = int(bool(cfg.get("_composite_logo"))) + int(bool(cfg.get("_composite_text")))
+                    cfg["_last_fast_tag"] = f"ultra-{n}ovl"
+                else:
+                    cfg["_last_fast_tag"] = "fast"
                 return True, True, ""
+            # Ultra that bai -> thu lai khong composite / cuda output
+            if cfg.get("_use_composite"):
+                cfg["_use_composite"] = False
+                cmd = build_fast_cmd(cfg, inp, outp, None, trim, dur_limit, norm_audio=norm_a, rotation=rot)
+                rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
+                low = stderr_txt.lower()
+                if rc == 0 and _is_valid(outp, min_kb) and not any(b in low for b in bad):
+                    cfg["_last_fast_tag"] = "fast"
+                    return True, True, ""
             if _corrupt(stderr_txt):
                 return False, False, _encode_fail_reason(rc, stderr_txt, outp, min_kb, "file loi/hong")
             # fast that bai -> ghi nhan, fallback sang drawtext
@@ -1972,85 +2350,75 @@ class Api:
         except Exception:
             pass
 
-        # Build filter_complex giong fast_cmd nhung dung CPU overlay (khong can CUDA)
-        # va xuat 1 frame PNG (nhanh, khong can encode ca video)
-        mx  = str(cfg.get("logo_margin_x", 15))
-        my  = str(cfg.get("logo_margin_y", 15))
-        def _cx(c): return str(cfg.get(f"logo_{c}_x", int(mx)))
-        def _cy(c): return str(cfg.get(f"logo_{c}_y", int(my)))
-
-        logo_list = []  # (path, scale_w, opacity, ox_expr, oy_expr)
-        if os.path.isfile(cfg.get("logo_image", "")):
-            logo_list.append((cfg["logo_image"], cfg.get("logo_scale_w", 160),
-                              cfg.get("logo_opacity", 0.7), mx, my))
-        for corner, ox_fn, oy_fn in [
-            ("tl", _cx("tl"),                         _cy("tl")),
-            ("tr", f"main_w-overlay_w-{_cx('tr')}",   _cy("tr")),
-            ("bl", _cx("bl"),                         f"main_h-overlay_h-{_cy('bl')}"),
-            ("br", f"main_w-overlay_w-{_cx('br')}",   f"main_h-overlay_h-{_cy('br')}"),
-        ]:
-            if cfg.get(f"enable_{corner}") and os.path.isfile(cfg.get(f"logo_{corner}", "")):
-                logo_list.append((cfg[f"logo_{corner}"], cfg.get(f"logo_{corner}_w", 120),
-                                  cfg.get(f"logo_{corner}_op", 0.7), ox_fn, oy_fn))
-
-        extra_inputs = []
-        fc_parts     = []
-        stream_in    = "[0:v]"
-
-        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
-            idx = i + 1
-            lbl = f"lg{i}"
-            out = f"v{i}"
-            extra_inputs += ["-i", lpath]
-            fc_parts.append(
-                f"[{idx}:v]scale={lw}:-1,"
-                f"colorchannelmixer=aa={lop}[{lbl}]"
-            )
-            fc_parts.append(
-                f"{stream_in}[{lbl}]overlay=x={ox}:y={oy}[{out}]"
-            )
-            stream_in = f"[{out}]"
-
-        # Seek giay 3 (tranh doan den dau), lay 1 frame -> PNG
-        cmd = [ff, "-hide_banner", "-loglevel", "error",
-               "-ss", "3", "-i", sample,
-               *extra_inputs]
-        if fc_parts:
-            cmd += ["-filter_complex", ";".join(fc_parts),
-                    "-map", stream_in]
-        cmd += ["-vframes", "1", "-y", out_png]
-
+        # Build overlay list — Fix anh dung bake chu PNG giong pipeline encode
+        bake_dir = None
         try:
-            rc, stderr = _run_ffmpeg(cmd, timeout=30)
-        except Exception as e:
-            return {"ok": False, "msg": str(e)}
+            if _is_fix_anh_static(cfg):
+                bake_dir = _tmp.mkdtemp(prefix="wm_snap_")
+                cfg["_wm_bake_cache"] = bake_dir
+                _prepare_static_wm(cfg, bake_dir)
+            logo_list = _build_fast_logo_list(cfg)
 
-        if rc != 0 or not os.path.exists(out_png) or os.path.getsize(out_png) < 100:
-            err_lines = [l for l in stderr.splitlines() if "error" in l.lower() or "invalid" in l.lower()]
-            msg = err_lines[-1][:120] if err_lines else stderr[-120:]
-            # Fallback: thu lai voi ss=0 (video ngan hon 3s)
-            cmd2 = [ff, "-hide_banner", "-loglevel", "error",
-                    "-i", sample, *extra_inputs]
+            extra_inputs = []
+            fc_parts     = []
+            stream_in    = "[0:v]"
+
+            for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
+                idx = i + 1
+                lbl = f"lg{i}"
+                out = f"v{i}"
+                extra_inputs += ["-i", lpath]
+                scale = f"scale={lw}:-1," if lw else ""
+                fc_parts.append(
+                    f"[{idx}:v]{scale}"
+                    f"colorchannelmixer=aa={lop}[{lbl}]"
+                )
+                fc_parts.append(
+                    f"{stream_in}[{lbl}]overlay=x={ox}:y={oy}[{out}]"
+                )
+                stream_in = f"[{out}]"
+
+            # Seek giay 3 (tranh doan den dau), lay 1 frame -> PNG
+            cmd = [ff, "-hide_banner", "-loglevel", "error",
+                   "-ss", "3", "-i", sample,
+                   *extra_inputs]
             if fc_parts:
-                cmd2 += ["-filter_complex", ";".join(fc_parts), "-map", stream_in]
-            cmd2 += ["-vframes", "1", "-y", out_png]
-            try:
-                rc2, _ = _run_ffmpeg(cmd2, timeout=30)
-            except Exception:
-                rc2 = -1
-            if rc2 != 0 or not os.path.exists(out_png) or os.path.getsize(out_png) < 100:
-                return {"ok": False, "msg": msg or "Xuat frame that bai"}
+                cmd += ["-filter_complex", ";".join(fc_parts),
+                        "-map", stream_in]
+            cmd += ["-vframes", "1", "-y", out_png]
 
-        # Mo anh bang Windows (explorer /select mo file, hoac os.startfile)
-        try:
-            os.startfile(out_png)
-        except Exception:
             try:
-                subprocess.Popen(["explorer", out_png])
-            except Exception:
-                pass
+                rc, stderr = _run_ffmpeg(cmd, timeout=30)
+            except Exception as e:
+                return {"ok": False, "msg": str(e)}
 
-        return {"ok": True, "path": out_png, "msg": "OK"}
+            if rc != 0 or not os.path.exists(out_png) or os.path.getsize(out_png) < 100:
+                err_lines = [l for l in stderr.splitlines() if "error" in l.lower() or "invalid" in l.lower()]
+                msg = err_lines[-1][:120] if err_lines else stderr[-120:]
+                cmd2 = [ff, "-hide_banner", "-loglevel", "error",
+                        "-i", sample, *extra_inputs]
+                if fc_parts:
+                    cmd2 += ["-filter_complex", ";".join(fc_parts), "-map", stream_in]
+                cmd2 += ["-vframes", "1", "-y", out_png]
+                try:
+                    rc2, _ = _run_ffmpeg(cmd2, timeout=30)
+                except Exception:
+                    rc2 = -1
+                if rc2 != 0 or not os.path.exists(out_png) or os.path.getsize(out_png) < 100:
+                    return {"ok": False, "msg": msg or "Xuat frame that bai"}
+
+            try:
+                os.startfile(out_png)
+            except Exception:
+                try:
+                    subprocess.Popen(["explorer", out_png])
+                except Exception:
+                    pass
+
+            return {"ok": True, "path": out_png, "msg": "OK"}
+        finally:
+            if bake_dir and os.path.isdir(bake_dir):
+                shutil.rmtree(bake_dir, ignore_errors=True)
 
     def create_outro_preview(self, config_json):
         cfg = {**DEFAULT_CONFIG, **json.loads(config_json)}
@@ -2310,25 +2678,37 @@ class Api:
             self._emit("done", {"ok": 0, "err": 0, "total": 0})
             return
 
-        global _outro_cache, _ffmpeg_log_lines, _upload_log_lines
+        global _outro_cache, _ffmpeg_log_lines, _upload_log_lines, _PROBE_CACHE, _COMPOSITE_DIM_CACHE
         _outro_cache      = {}
         _ffmpeg_log_lines = []
         _upload_log_lines = []
+        _PROBE_CACHE      = {}
+        _COMPOSITE_DIM_CACHE = {}
+        _wm_bake_dir      = None
+        if _is_fix_anh_static(cfg):
+            _wm_bake_dir = tempfile.mkdtemp(prefix="wm_bake_", dir=_tmp_base)
+            cfg["_wm_bake_cache"] = _wm_bake_dir
+            if _prepare_static_wm(cfg, _wm_bake_dir):
+                self._emit("log", {"cls": "ok",
+                    "msg": "✓ Fix ảnh ULTRA: composite WM full-frame → 1-2 overlay_cuda 🚀"})
+            else:
+                self._emit("log", {"cls": "warn",
+                    "msg": "Can Pillow de composite WM nhanh — pip install Pillow"})
         if tg_on:
             _emit_upload(f"=== Auto upload BAT → {cfg.get('tg_target')} ===")
 
         dynamic = _has_dynamic_wm(cfg)
         cfg["_fast_ok"] = True
-        if not dynamic:
+        if _is_fix_anh_static(cfg):
             self._emit("log", {"cls":"info","msg":"Dang kiem tra NVENC…"})
             if fast_cuda_supported(cfg):
-                self._emit("log", {"cls":"ok","msg":
-                    "✓ NVENC OK — pipeline: NVDEC decode + overlay CPU + NVENC encode 🚀"})
+                pipe = "ULTRA composite + NVDEC cuda + overlay_cuda + NVENC"
+                self._emit("log", {"cls":"ok","msg": f"✓ NVENC OK — {pipe} 🚀"})
             else:
                 cfg["_fast_ok"] = False
                 self._emit("log", {"cls":"warn","msg":
                     "⚠ NVENC khong chay duoc → fallback libx264 CPU."})
-        else:
+        elif dynamic or cfg.get("hs_mode"):
             self._emit("log", {"cls":"info","msg":"✨ HS preset: WM dong (drawtext CPU)"})
             cfg["_fast_ok"] = False
         self._emit("total", {"total": total})
@@ -2339,9 +2719,9 @@ class Api:
                 wk_info,
                 "logo " + (f"AUTO {int(ratio*100)}% (>{int(thr)}s)" if thr > 0 else "FULL")]
         if parts > 1:               info.append(f"VA Pro {parts} phan")
-        if not dynamic:
-            info.append("🚀 overlay_cuda")
-        else:
+        if _is_fix_anh_static(cfg):
+            info.append("🚀 ULTRA composite")
+        elif dynamic or cfg.get("hs_mode"):
             info.append("✨ WM dong (HS preset)")
         if cfg.get("enable_outro"): info.append("🎬 outro")
         self._emit("log", {"cls": "info", "msg": " | ".join(info)})
@@ -2380,7 +2760,8 @@ class Api:
                 if success: produced.append(outp)
                 mode    = "anh"
             else:
-                duration   = _get_duration(ffprobe_p, inp)
+                meta = _probe_file_cached(ffprobe_p, inp)
+                duration   = meta["duration"]
                 tmp_dir    = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
                 # Render thang ra out_dir, file temp chi dung cho concat_outro.
                 dest_dir   = out_dir
@@ -2403,7 +2784,7 @@ class Api:
                                                          p_start, p_limit, use_gpu=use_gpu)
                         if not s and reason:
                             fail_reason = reason
-                        tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
+                        tag = " [⚡" + (cfg.get("_last_fast_tag") or "fast") + "]" if fast else (" [x264]" if not use_gpu else "")
                         if s and cfg.get("enable_outro"):
                             s2, emsg = concat_outro(ff, ffprobe_p, wm_tmp, p_outp, cfg, tmp_dir)
                             if not s2:
@@ -2426,12 +2807,31 @@ class Api:
                         n_parts  = max(1, int(avail)) if avail < parts else parts
                         part_len = avail / n_parts
                         ok_p     = 0
-                        for i in range(1, n_parts + 1):
-                            p_start = trim + (i-1) * part_len
-                            p_limit = part_len if i < n_parts else None
-                            p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
-                            s, _    = _do_part(p_start, p_limit, p_outp)
-                            if s: ok_p += 1
+                        # Fix anh: encode cac part song song (moi part = 1 NVENC job)
+                        if _is_fix_anh_static(cfg) and n_parts > 1:
+                            from concurrent.futures import ThreadPoolExecutor, as_completed
+                            part_jobs = []
+                            for i in range(1, n_parts + 1):
+                                p_start = trim + (i - 1) * part_len
+                                p_limit = part_len if i < n_parts else None
+                                p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
+                                part_jobs.append((p_start, p_limit, p_outp))
+                            with ThreadPoolExecutor(max_workers=min(n_parts, gpu_workers)) as pool:
+                                futs = [pool.submit(_do_part, ps, pl, po) for ps, pl, po in part_jobs]
+                                for fut in as_completed(futs):
+                                    try:
+                                        if fut.result()[0]:
+                                            ok_p += 1
+                                    except Exception as pe:
+                                        with lock:
+                                            self._emit("log", {"cls":"err","msg":f"  Part loi: {pe}"})
+                        else:
+                            for i in range(1, n_parts + 1):
+                                p_start = trim + (i-1) * part_len
+                                p_limit = part_len if i < n_parts else None
+                                p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
+                                s, _    = _do_part(p_start, p_limit, p_outp)
+                                if s: ok_p += 1
                         success = ok_p == n_parts
                         mode    = f"VA Pro {n_parts}p ({ok_p} OK)"
                     else:
@@ -2540,6 +2940,9 @@ class Api:
 
         for t in threads:
             t.join()
+
+        if _wm_bake_dir and os.path.isdir(_wm_bake_dir):
+            shutil.rmtree(_wm_bake_dir, ignore_errors=True)
 
         if _cancel_flag.is_set():
             self._emit("log", {"cls": "warn", "msg": "Da huy (cac job dang chay da chay not)"})
