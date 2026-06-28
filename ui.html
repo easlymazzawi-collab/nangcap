@@ -621,7 +621,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <div class="sh">Chữ watermark giữa</div>
         <div class="swrow">
           <div class="lbl">Bật chữ giữa
-            <small>Bật → dùng CPU overlay (drawtext không chạy trên CUDA)</small></div>
+            <small>Fix ảnh: tự bake PNG → vẫn CUDA. HS/dynamic mới dùng drawtext CPU</small></div>
           <div class="sw" id="tglCenter" onclick="tgl(this);updateCudaHint()"></div>
         </div>
         <div style="margin-top:6px">
@@ -645,7 +645,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac">
-          🚀 <b>overlay_cuda</b> mọi opacity — CUDA (~28-35x). Chỉ bật chữ giữa mới fallback CPU (~13x)
+          🚀 <b>overlay_cuda</b> (~28-40x). Fix ảnh: chữ giữa + góc tự bake PNG → vẫn full CUDA. Chỉ HS/dynamic mới CPU (~13x)
         </div>
         <div class="row r2">
           <div class="fld"><label>Chất lượng (CQ)</label>
@@ -735,7 +735,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
   <!-- Pipeline status live -->
   <div class="pipe-status" id="pipeStatus">
     <div class="pipe-dot cuda" id="pipeDot"></div>
-    <span class="pipe-txt" id="pipeTxt"><b>overlay_cuda</b> — FULL GPU, không chữ giữa</span>
+    <span class="pipe-txt" id="pipeTxt"><b>overlay_cuda</b> — Fix ảnh full GPU</span>
   </div>
 
   <div class="stats">
@@ -828,26 +828,24 @@ function switchTab(i){
 }
 
 // ── Pipeline status ──
-// Mirror of Python use_cuda_overlay logic:
-// Pipeline A (CUDA) cho moi opacity — chi fallback CPU khi co center text (drawtext = CPU filter).
+// Pipeline A (CUDA) cho Fix ảnh — chữ tinh bake PNG. Chi HS/dynamic moi CPU.
 function updateCudaHint(){
-  const centerOn=isOn('tglCenter');
-  const useCuda = !centerOn;
+  const hsOn=hsActive;
+  const useCuda = !hsOn;
 
-  // opacity hint removed: Pipeline A handles alpha via yuva420p+alpha=1, no more CPU fallback for opacity
   $('cudaHint').style.display='none';
 
   const dot=$('pipeDot'),txt=$('pipeTxt'),badge=$('cudaBadge'),info=$('cudaInfo');
   if(useCuda){
     dot.className='pipe-dot cuda';
-    txt.innerHTML='<b>overlay_cuda</b> — FULL GPU (~28-35x realtime) 🚀';
+    txt.innerHTML='<b>overlay_cuda</b> — Fix ảnh full GPU (~28-40x) 🚀';
     badge.style.display='';
-    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>overlay_cuda</b> (~28-35x) — mọi opacity đều giữ CUDA. Chỉ bật chữ giữa mới chuyển CPU (~13x)';}
+    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>Fix ảnh</b>: logo + chữ giữa/góc bake PNG → overlay_cuda. Bật HS mới chuyển CPU (~13x)';}
   }else{
     dot.className='pipe-dot cpu';
-    txt.innerHTML='<b>CPU overlay</b> — chữ giữa bật → (~13x realtime)';
+    txt.innerHTML='<b>CPU overlay</b> — HS/dynamic (~13x realtime)';
     badge.style.display='none';
-    if(info){info.className='infobox yel';info.innerHTML='⚠ Đang dùng CPU overlay (~13x) vì chữ giữa bật (drawtext). Tắt chữ giữa để quay lại CUDA.';}
+    if(info){info.className='infobox yel';info.innerHTML='⚠ HS preset: WM động (drawtext CPU). Tắt HS để quay lại CUDA.';}
   }
 }
 
