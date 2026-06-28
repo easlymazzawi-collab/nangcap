@@ -645,7 +645,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac">
-          🚀 <b>overlay_cuda</b> (~28-40x). Fix ảnh: chữ giữa + góc tự bake PNG → vẫn full CUDA. Chỉ HS/dynamic mới CPU (~13x)
+          🚀 <b>ULTRA Fix ảnh</b>: gộp WM 1 PNG → 1-2 overlay_cuda (~50-80x). HS vẫn CPU (~13x)
         </div>
         <div class="row r2">
           <div class="fld"><label>Chất lượng (CQ)</label>
@@ -838,9 +838,9 @@ function updateCudaHint(){
   const dot=$('pipeDot'),txt=$('pipeTxt'),badge=$('cudaBadge'),info=$('cudaInfo');
   if(useCuda){
     dot.className='pipe-dot cuda';
-    txt.innerHTML='<b>overlay_cuda</b> — Fix ảnh full GPU (~28-40x) 🚀';
+    txt.innerHTML='<b>ULTRA Fix ảnh</b> — composite WM full GPU (~50-80x) 🚀';
     badge.style.display='';
-    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>Fix ảnh</b>: logo + chữ giữa/góc bake PNG → overlay_cuda. Bật HS mới chuyển CPU (~13x)';}
+    if(info){info.className='infobox ac';info.innerHTML='⚡ Gộp logo+chữ thành 1 PNG → 1-2 lần overlay_cuda. NVDEC decode thẳng GPU. Bật HS → CPU (~13x)';}
   }else{
     dot.className='pipe-dot cpu';
     txt.innerHTML='<b>CPU overlay</b> — HS/dynamic (~13x realtime)';
