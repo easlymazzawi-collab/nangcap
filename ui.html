@@ -494,7 +494,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac" id="cudaInfo">
-          ⚡ <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa pre-render PNG trên GPU. Chỉ hiệu ứng động (fade/DVD) mới dùng CPU (~13x).
+          ⚡ <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa + chữ 4 góc pre-render PNG trên GPU. Chỉ hiệu ứng động (fade/DVD) mới dùng CPU (~13x).
         </div>
         <div class="logo-grid">
           <!-- TL -->
@@ -645,7 +645,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac">
-          🚀 <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa PNG + NVDEC decode. Chỉ hiệu ứng động mới fallback CPU (~13x)
+          🚀 <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa + 4 góc PNG + NVDEC decode. Chỉ hiệu ứng động mới fallback CPU (~13x)
         </div>
         <div class="row r2">
           <div class="fld"><label>Chất lượng (CQ)</label>
@@ -842,7 +842,7 @@ function updateCudaHint(){
     dot.className='pipe-dot cuda';
     txt.innerHTML='<b>Turbo overlay_cuda</b> — FULL GPU + NVDEC (~40-55x) 🚀';
     badge.style.display='';
-    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa pre-render PNG trên GPU. Chỉ hiệu ứng động (fade/DVD) mới dùng CPU (~13x).';}
+    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa + chữ 4 góc pre-render PNG trên GPU. Chỉ hiệu ứng động (fade/DVD) mới dùng CPU (~13x).';}
   }else{
     dot.className='pipe-dot cpu';
     txt.innerHTML='<b>CPU drawtext</b> — hiệu ứng động bật → (~13x realtime)';

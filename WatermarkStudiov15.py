@@ -224,6 +224,11 @@ DEFAULT_CONFIG = {
     "enable_tr": False, "logo_tr": "", "logo_tr_w": 120, "logo_tr_op": 0.7, "logo_tr_x": 15, "logo_tr_y": 15,
     "enable_bl": False, "logo_bl": "", "logo_bl_w": 120, "logo_bl_op": 0.7, "logo_bl_x": 15, "logo_bl_y": 15,
     "enable_br": False, "logo_br": "", "logo_br_w": 120, "logo_br_op": 0.7, "logo_br_x": 15, "logo_br_y": 15,
+    # Chu 4 goc (tinh) — pre-render PNG trong Turbo mode
+    "text_top_left": "",     "top_left_size": 22,     "top_left_color": "white",
+    "text_top_right": "",    "top_right_size": 22,    "top_right_color": "white",
+    "text_bottom_left": "",  "bottom_left_size": 22,  "bottom_left_color": "white",
+    "text_bottom_right": "", "bottom_right_size": 22, "bottom_right_color": "white",
     # Chu watermark giua man hinh (tinh)
     "enable_center":  False,
     "center_text":    "t.me/VnKong",
@@ -328,6 +333,7 @@ _running          = False
 _cancel_flag      = threading.Event()
 _outro_cache      = {}
 _center_png_cache = {}
+_text_png_cache   = {}
 _ffmpeg_log_lines = []
 _upload_log_lines = []   # log rieng cho upload Telegram
 
@@ -720,6 +726,98 @@ def _display_wh(w, h, rotation):
         return h, w
     return w, h
 
+def _parse_font_color(color, default_alpha=255):
+    """Parse 'white', 'white@0.5', '#ff0000' -> (r,g,b,a)."""
+    s = (color or "white").strip()
+    alpha = default_alpha
+    if "@" in s:
+        s, a = s.rsplit("@", 1)
+        try:
+            alpha = int(float(a) * 255)
+        except Exception:
+            pass
+    s = s.lower()
+    named = {"white": (255, 255, 255), "black": (0, 0, 0),
+             "red": (255, 0, 0), "yellow": (255, 255, 0)}
+    if s in named:
+        r, g, b = named[s]
+    elif s.startswith("#"):
+        r, g, b = _hex_to_rgb(s)
+    else:
+        r, g, b = 255, 255, 255
+    return (r, g, b, alpha)
+
+def render_text_png(text, size, color, font_path, out_path, pad=4):
+    """Pre-render 1 dong chu thanh PNG tight box (cho chu 4 goc)."""
+    if not PIL_OK:
+        return False, "Can Pillow"
+    text = (text or "").strip()
+    if not text:
+        return False, "rong"
+    size = int(size or 22)
+    fill = _parse_font_color(color)
+    key  = hashlib.md5(
+        f"{text}|{size}|{color}|{font_path}|{pad}".encode("utf-8")
+    ).hexdigest()
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached = os.path.join(cache_dir, f"tx_{key}.png")
+    if key in _text_png_cache and os.path.isfile(_text_png_cache[key]):
+        cached = _text_png_cache[key]
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        if cached != out_path:
+            shutil.copy2(cached, out_path)
+        return True, ""
+    try:
+        font = ImageFont.truetype(font_path, size)
+    except Exception:
+        font = _pil_font(size)
+        if font is None:
+            return False, "font loi"
+    tmp  = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tmp)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw   = bbox[2] - bbox[0] + pad * 2
+    th   = bbox[3] - bbox[1] + pad * 2
+    img  = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+    img.save(cached, "PNG")
+    _text_png_cache[key] = cached
+    if cached != out_path:
+        shutil.copy2(cached, out_path)
+    return True, ""
+
+def _corner_text_overlays(cfg):
+    """Tra danh sach chu goc tinh can overlay_cuda: (path, ox, oy).
+    Bo qua goc da co logo PNG."""
+    font_p = cfg.get("font_file", _default_font())
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    defs = [
+        ("tl", "text_top_left",     "top_left_size",     "top_left_color",
+         "10", "10"),
+        ("tr", "text_top_right",    "top_right_size",    "top_right_color",
+         "main_w-overlay_w-10", "10"),
+        ("bl", "text_bottom_left",  "bottom_left_size",  "bottom_left_color",
+         "10", "main_h-overlay_h-10"),
+        ("br", "text_bottom_right", "bottom_right_size", "bottom_right_color",
+         "main_w-overlay_w-10", "main_h-overlay_h-10"),
+    ]
+    out = []
+    for corner, text_k, size_k, color_k, ox, oy in defs:
+        txt = (cfg.get(text_k) or "").strip()
+        if not txt:
+            continue
+        if cfg.get(f"enable_{corner}") and os.path.isfile(cfg.get(f"logo_{corner}", "")):
+            continue
+        png = os.path.join(cache_dir, f"corner_{corner}_{hashlib.md5(txt.encode()).hexdigest()[:8]}.png")
+        ok, _ = render_text_png(txt, cfg.get(size_k, 22), cfg.get(color_k, "white"),
+                                font_p, png)
+        if ok:
+            out.append((png, ox, oy))
+    return out
+
 def render_center_text_png(cfg, width, height, out_path):
     """Pre-render chu giua tinh thanh PNG trong suot de overlay_cuda (khong drawtext CPU)."""
     if not PIL_OK:
@@ -766,10 +864,10 @@ def render_center_text_png(cfg, width, height, out_path):
 
 def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None,
                    norm_audio=False, mode=None, rotation=0, video_w=None, video_h=None):
-    """Pipeline overlay logo PNG (+ chu giua PNG) -> NVENC.
+    """Pipeline overlay logo PNG (+ chu 4 goc + chu giua PNG) -> NVENC.
 
     TURBO A (~40-55x):
-        NVDEC decode -> crop_cuda -> overlay_cuda [video + logos + center PNG] -> NVENC
+        NVDEC decode -> crop_cuda -> overlay_cuda [logos + chu goc + chu giua] -> NVENC
     Fallback CPU decode khi co rotation hoac tat turbo_nvdec.
     Tra ve None neu can drawtext dong (center fade / HS preset).
     """
@@ -809,6 +907,8 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None,
     for en_k, p_k, w_k, op_k, ox, oy in corner_defs:
         if cfg.get(en_k) and os.path.isfile(cfg.get(p_k, "")):
             logo_list.append((cfg[p_k], cfg.get(w_k, 120), cfg.get(op_k, 0.7), ox, oy))
+
+    corner_texts = _corner_text_overlays(cfg)
 
     extra_inputs = []
     fc_parts     = []
@@ -854,20 +954,37 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None,
         )
         stream_in = f"[{out}]"
 
+    # Chu 4 goc tinh: PNG tight box -> overlay_cuda (thay drawtext CPU)
+    next_idx = len(logo_list) + 1
+    for j, (tpath, tox, toy) in enumerate(corner_texts):
+        idx = next_idx + j
+        lbl = f"tx{j}"
+        out = f"vt{j}"
+        extra_inputs += ["-i", tpath]
+        fc_parts.append(
+            f"[{idx}:v]format=rgba"
+            f"{et_pad},"
+            f"format=yuva420p,hwupload[{lbl}]"
+        )
+        fc_parts.append(
+            f"{stream_in}[{lbl}]overlay_cuda=x={tox}:y={toy}[{out}]"
+        )
+        stream_in = f"[{out}]"
+
     # Chu giua tinh: pre-render PNG full-frame -> overlay_cuda (khong drawtext CPU)
     if has_static_center and disp_w and disp_h:
         center_png = os.path.join(tempfile.gettempdir(), "gpu_wm_text", "_center_live.png")
         ok_ct, _ = render_center_text_png(cfg, disp_w, disp_h, center_png)
         if not ok_ct:
             return None
-        cidx = len(logo_list) + 1
+        cidx = len(logo_list) + len(corner_texts) + 1
         extra_inputs += ["-i", center_png]
         fc_parts.append(f"[{cidx}:v]format=yuva420p,hwupload[ct]")
-        out_ct = f"v{cidx}"
+        out_ct = f"vct"
         fc_parts.append(f"{stream_in}[ct]overlay_cuda=x=0:y=0[{out_ct}]")
         stream_in = f"[{out_ct}]"
 
-    if not logo_list and not has_static_center:
+    if not logo_list and not has_static_center and not corner_texts:
         if use_turbo:
             fc_parts = [f"[0:v]crop_cuda={disp_w}:{disp_h}[base]"]
         else:
@@ -2059,6 +2176,30 @@ class Api:
             )
             stream_in = f"[{out}]"
 
+        next_idx = len(logo_list) + 1
+        corner_tx = _corner_text_overlays(cfg)
+        for j, (tpath, tox, toy) in enumerate(corner_tx):
+            idx = next_idx + j
+            lbl = f"tx{j}"
+            out = f"vt{j}"
+            extra_inputs += ["-i", tpath]
+            fc_parts.append(f"[{idx}:v]format=rgba[{lbl}]")
+            fc_parts.append(f"{stream_in}[{lbl}]overlay=x={tox}:y={toy}[{out}]")
+            stream_in = f"[{out}]"
+
+        if cfg.get("enable_center") and (cfg.get("center_text") or "").strip():
+            ffprobe_p = cfg.get("ffmpeg_path", "").replace("ffmpeg.exe", "ffprobe.exe").replace("ffmpeg", "ffprobe")
+            w, h, _ = _probe_wh(ffprobe_p, sample) if os.path.isfile(ffprobe_p) else (1280, 720, "")
+            if not (w and h):
+                w, h = 1280, 720
+            center_png = os.path.join(_tmp.gettempdir(), "_wm_snap_center.png")
+            if render_center_text_png(cfg, w, h, center_png)[0]:
+                cidx = len(logo_list) + len(corner_tx) + 1
+                extra_inputs += ["-i", center_png]
+                fc_parts.append(f"[{cidx}:v]format=rgba[ct]")
+                fc_parts.append(f"{stream_in}[ct]overlay=x=0:y=0[vct]")
+                stream_in = "[vct]"
+
         # Seek giay 3 (tranh doan den dau), lay 1 frame -> PNG
         cmd = [ff, "-hide_banner", "-loglevel", "error",
                "-ss", "3", "-i", sample,
@@ -2358,9 +2499,10 @@ class Api:
             self._emit("done", {"ok": 0, "err": 0, "total": 0})
             return
 
-        global _outro_cache, _center_png_cache, _ffmpeg_log_lines, _upload_log_lines
+        global _outro_cache, _center_png_cache, _text_png_cache, _ffmpeg_log_lines, _upload_log_lines
         _outro_cache      = {}
         _center_png_cache = {}
+        _text_png_cache   = {}
         _ffmpeg_log_lines = []
         _upload_log_lines = []
         if tg_on:
