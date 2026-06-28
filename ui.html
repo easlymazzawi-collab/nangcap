@@ -2,7 +2,7 @@
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
-<title>Watermark Studio v7</title>
+<title>Watermark Studio v8 Turbo</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -294,7 +294,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
   <div class="brand">
     <div class="logo-mark">W</div>
     <div class="name">Watermark Studio</div>
-    <div class="ver">v7</div>
+    <div class="ver">v8 Turbo</div>
   </div>
 
   <!-- Preset selector -->
@@ -318,7 +318,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
     </div>
   </div>
 
-  <div class="pipeline-tag">overlay_cuda AUTO</div>
+  <div class="pipeline-tag">TURBO overlay_cuda</div>
   <div class="grow"></div>
   <div class="tbtn" onclick="openFflog()">📋 Log</div>
   <div class="tbtn" id="benchBtn" onclick="runBenchmark()">⚡ Test GPU</div>
@@ -494,7 +494,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac" id="cudaInfo">
-          ⚡ <b>overlay_cuda</b> (~28-35x) — mọi opacity đều giữ CUDA. Chỉ bật chữ giữa mới chuyển CPU (~13x).
+          ⚡ <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa + chữ 4 góc pre-render PNG trên GPU. Chỉ hiệu ứng động (fade/DVD) mới dùng CPU (~13x).
         </div>
         <div class="logo-grid">
           <!-- TL -->
@@ -621,7 +621,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <div class="sh">Chữ watermark giữa</div>
         <div class="swrow">
           <div class="lbl">Bật chữ giữa
-            <small>Bật → dùng CPU overlay (drawtext không chạy trên CUDA)</small></div>
+            <small>Turbo: pre-render PNG → overlay_cuda (FULL GPU, không drawtext)</small></div>
           <div class="sw" id="tglCenter" onclick="tgl(this);updateCudaHint()"></div>
         </div>
         <div style="margin-top:6px">
@@ -645,7 +645,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac">
-          🚀 <b>overlay_cuda</b> mọi opacity — CUDA (~28-35x). Chỉ bật chữ giữa mới fallback CPU (~13x)
+          🚀 <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa + 4 góc PNG + NVDEC decode. Chỉ hiệu ứng động mới fallback CPU (~13x)
         </div>
         <div class="row r2">
           <div class="fld"><label>Chất lượng (CQ)</label>
@@ -735,7 +735,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
   <!-- Pipeline status live -->
   <div class="pipe-status" id="pipeStatus">
     <div class="pipe-dot cuda" id="pipeDot"></div>
-    <span class="pipe-txt" id="pipeTxt"><b>overlay_cuda</b> — FULL GPU, không chữ giữa</span>
+    <span class="pipe-txt" id="pipeTxt"><b>Turbo overlay_cuda</b> — FULL GPU + NVDEC</span>
   </div>
 
   <div class="stats">
@@ -828,26 +828,26 @@ function switchTab(i){
 }
 
 // ── Pipeline status ──
-// Mirror of Python use_cuda_overlay logic:
-// Pipeline A (CUDA) cho moi opacity — chi fallback CPU khi co center text (drawtext = CPU filter).
+// Turbo v8: chữ giữa tinh = PNG overlay_cuda (FULL GPU).
+// Chi center fade / HS preset (drawtext dong) moi fallback CPU.
 function updateCudaHint(){
-  const centerOn=isOn('tglCenter');
-  const useCuda = !centerOn;
+  const centerFade=isOn('tglCenterFade');
+  const hsOn=isOn('tglHs');
+  const useCuda = !centerFade && !hsOn;
 
-  // opacity hint removed: Pipeline A handles alpha via yuva420p+alpha=1, no more CPU fallback for opacity
   $('cudaHint').style.display='none';
 
   const dot=$('pipeDot'),txt=$('pipeTxt'),badge=$('cudaBadge'),info=$('cudaInfo');
   if(useCuda){
     dot.className='pipe-dot cuda';
-    txt.innerHTML='<b>overlay_cuda</b> — FULL GPU (~28-35x realtime) 🚀';
+    txt.innerHTML='<b>Turbo overlay_cuda</b> — FULL GPU + NVDEC (~40-55x) 🚀';
     badge.style.display='';
-    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>overlay_cuda</b> (~28-35x) — mọi opacity đều giữ CUDA. Chỉ bật chữ giữa mới chuyển CPU (~13x)';}
+    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>Turbo overlay_cuda</b> (~40-55x) — chữ giữa + chữ 4 góc pre-render PNG trên GPU. Chỉ hiệu ứng động (fade/DVD) mới dùng CPU (~13x).';}
   }else{
     dot.className='pipe-dot cpu';
-    txt.innerHTML='<b>CPU overlay</b> — chữ giữa bật → (~13x realtime)';
+    txt.innerHTML='<b>CPU drawtext</b> — hiệu ứng động bật → (~13x realtime)';
     badge.style.display='none';
-    if(info){info.className='infobox yel';info.innerHTML='⚠ Đang dùng CPU overlay (~13x) vì chữ giữa bật (drawtext). Tắt chữ giữa để quay lại CUDA.';}
+    if(info){info.className='infobox yel';info.innerHTML='⚠ Đang dùng CPU drawtext (~13x) vì hiệu ứng động bật (fade/DVD/HS). Tắt để quay lại Turbo CUDA.';}
   }
 }
 
@@ -1330,7 +1330,7 @@ async function _init(){
   await refreshOptions();
   setInterval(_ffPoll,400);
   updateCudaHint();
-  log('Watermark Studio v7 sẵn sàng 🚀','ok');
+  log('Watermark Studio v8 Turbo sẵn sàng 🚀','ok');
 }
 window.addEventListener('pywebviewready',_init);
 setTimeout(_init,1500);
