@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Watermark Studio v7</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;--panel:#0c0f18;--panel2:#111520;--field:#161b27;
+  --line:#1c2235;--line2:#252d42;
+  --tx:#dde2f0;--tx2:#7a85a3;--tx3:#3d4a66;
+  --ac:#4fffb0;--ac2:#29d98a;--acsoft:rgba(79,255,176,.10);--acglow:rgba(79,255,176,.25);
+  --red:#ff5f72;--yel:#ffca45;--blu:#4fa8ff;--pur:#b47cff;--ora:#ff8c42;
+  --r:8px;--r2:5px;
+  --side-w:310px;
+}
+html,body{height:100%;background:var(--bg);color:var(--tx);
+  font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;
+  overflow:hidden;-webkit-font-smoothing:antialiased;line-height:1.45}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--tx3)}
+
+/* ── App shell ── */
+.app{display:flex;flex-direction:column;height:100vh}
+
+/* ── Topbar ── */
+.bar{background:var(--panel);border-bottom:1px solid var(--line);
+  display:flex;align-items:center;padding:0 12px;gap:8px;height:42px;flex:none}
+.brand{display:flex;align-items:center;gap:7px;margin-right:4px}
+.brand .logo-mark{
+  width:24px;height:24px;border-radius:6px;flex:none;
+  background:linear-gradient(135deg,var(--ac),#00c8ff);
+  display:flex;align-items:center;justify-content:center;
+  font-size:11px;font-weight:800;color:#040c10;letter-spacing:-.5px}
+.brand .name{font-weight:700;font-size:13px;letter-spacing:-.2px}
+.brand .ver{font-size:9px;color:var(--ac);background:var(--acsoft);
+  padding:1px 5px;border-radius:20px;font-weight:700;letter-spacing:.3px}
+.pipeline-tag{
+  display:flex;align-items:center;gap:4px;
+  background:linear-gradient(90deg,rgba(79,255,176,.08),rgba(79,200,255,.08));
+  border:1px solid rgba(79,255,176,.18);border-radius:20px;
+  padding:2px 9px;font-size:10px;color:var(--ac);font-weight:600;letter-spacing:.3px}
+.pipeline-tag::before{content:"";width:6px;height:6px;border-radius:50%;
+  background:var(--ac);box-shadow:0 0 6px var(--ac);animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
+.grow{flex:1}
+.tbtn{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--tx2);
+  background:var(--panel2);border:1px solid var(--line);
+  padding:4px 9px;border-radius:var(--r2);cursor:pointer;transition:.12s;user-select:none}
+.tbtn:hover{color:var(--tx);border-color:var(--line2)}
+
+/* ── Main layout ── */
+.main-wrap{display:flex;flex:1;overflow:hidden}
+
+/* ── Sidebar ── */
+.side{background:var(--panel);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;width:var(--side-w);
+  min-width:230px;max-width:500px;flex:none;position:relative}
+.resize-handle{position:absolute;right:-3px;top:0;bottom:0;width:6px;
+  cursor:col-resize;z-index:10;background:transparent}
+.resize-handle:hover,.resize-handle.dragging{background:var(--ac);opacity:.3}
+
+/* ── Tabs ── */
+.side-tabs{display:flex;border-bottom:1px solid var(--line);flex:none;background:var(--bg)}
+.stab{flex:1;padding:8px 2px;text-align:center;font-size:10.5px;
+  color:var(--tx3);cursor:pointer;border-bottom:2px solid transparent;
+  transition:.14s;user-select:none;letter-spacing:.1px}
+.stab.act{color:var(--ac);border-bottom-color:var(--ac);background:var(--panel)}
+.stab:hover:not(.act){color:var(--tx2)}
+.tab-body{display:none;padding:9px;flex:1;overflow-y:auto;overflow-x:hidden}
+.tab-body.act{display:block}
+
+/* ── Cards ── */
+.card{background:var(--panel2);border:1px solid var(--line);
+  border-radius:var(--r);margin-bottom:7px;overflow:hidden}
+.card>header{display:flex;align-items:center;gap:7px;padding:7px 10px;
+  font-size:11px;font-weight:600;cursor:pointer;user-select:none;color:var(--tx2)}
+.card>header:hover{background:rgba(255,255,255,.02)}
+.card>header .hl{color:var(--tx);font-weight:700}
+.card>header .arr{font-size:10px;color:var(--tx3);transition:transform .17s;margin-left:auto}
+.card.open>header .arr{transform:rotate(90deg)}
+.card .body{display:none;padding:4px 9px 9px}
+.card.open .body{display:block}
+
+/* ── Fields ── */
+.fld{margin-bottom:6px}.fld:last-child{margin-bottom:2px}
+.fld label{font-size:10px;color:var(--tx3);display:block;margin-bottom:3px;
+  letter-spacing:.4px;text-transform:uppercase;font-weight:600}
+.fld input,.fld select,.fld textarea{
+  width:100%;background:var(--field);border:1px solid var(--line);
+  border-radius:var(--r2);padding:5px 8px;color:var(--tx);
+  font-size:12px;outline:none;transition:border-color .12s;font-family:inherit}
+.fld input:focus,.fld select:focus,.fld textarea:focus{border-color:var(--ac)}
+.fld textarea{resize:vertical;min-height:38px;line-height:1.4}
+select option{background:var(--panel2)}
+.row{display:grid;gap:5px}
+.r2{grid-template-columns:1fr 1fr}
+.r3{grid-template-columns:1fr 1fr 1fr}
+.with-btn{display:flex;gap:4px}.with-btn input{flex:1;min-width:0}
+.mini{background:var(--field);border:1px solid var(--line);border-radius:var(--r2);
+  color:var(--tx2);padding:0 8px;font-size:11px;cursor:pointer;
+  transition:.12s;white-space:nowrap;height:28px;user-select:none;font-family:inherit}
+.mini:hover{color:var(--tx);border-color:var(--ac);background:var(--acsoft)}
+.mini:active{transform:scale(.97)}
+
+/* ── Sliders ── */
+.sl label{display:flex;justify-content:space-between;align-items:center}
+.sl .val{color:var(--ac);font-weight:700;font-size:11px;
+  text-transform:none;letter-spacing:0;min-width:36px;text-align:right}
+input[type=range]{-webkit-appearance:none;height:4px;border-radius:3px;
+  background:var(--line2);padding:0;margin-top:3px;width:100%}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
+  border-radius:50%;background:var(--ac);cursor:pointer;border:2px solid var(--panel2);
+  transition:.1s}
+input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
+
+/* ── Toggles ── */
+.sw{width:30px;height:16px;border-radius:16px;background:var(--line2);
+  position:relative;cursor:pointer;transition:.15s;flex:none;user-select:none}
+.sw::after{content:"";position:absolute;width:10px;height:10px;border-radius:50%;
+  background:#fff;top:3px;left:3px;transition:.15s}
+.sw.on{background:var(--ac)}.sw.on::after{left:17px}
+.sw.blu.on{background:var(--blu)}.sw.yel.on{background:var(--yel)}.sw.pur.on{background:var(--pur)}.sw.red.on{background:var(--red)}
+.swrow{display:flex;align-items:center;gap:8px;padding:5px 0;
+  border-bottom:1px solid var(--line)}
+.swrow:last-child{border-bottom:none}
+.swrow .lbl{flex:1;font-size:12px;color:var(--tx)}
+.swrow .lbl small{display:block;font-size:10px;color:var(--tx3);margin-top:1px}
+
+/* ── Logo corner grid ── */
+.logo-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:7px}
+.logo-box{background:var(--field);border:1px solid var(--line);
+  border-radius:var(--r2);padding:7px}
+.logo-box-head{display:flex;align-items:center;gap:5px;margin-bottom:5px}
+.logo-box-label{font-size:10px;color:var(--tx2);font-weight:600;letter-spacing:.2px}
+.logo-box .path-row{display:flex;gap:3px;margin-bottom:4px}
+.logo-box .path-row input{flex:1;min-width:0;background:var(--panel2);
+  border:1px solid var(--line);border-radius:4px;padding:3px 6px;
+  color:var(--tx);font-size:10px;outline:none}
+.logo-box .path-row input:focus{border-color:var(--ac)}
+.logo-box .path-row button{background:var(--panel2);border:1px solid var(--line);
+  border-radius:4px;color:var(--tx2);padding:0 6px;font-size:10px;cursor:pointer;height:22px}
+.logo-box .path-row button:hover{color:var(--tx);border-color:var(--ac)}
+.logo-box .ctrl-row{display:flex;align-items:center;gap:4px;margin-top:3px}
+.logo-box .ctrl-row span{font-size:9px;color:var(--tx3);white-space:nowrap;min-width:14px}
+.logo-box .ctrl-row input[type=range]{flex:1;height:3px}
+.logo-box .ctrl-row .val{font-size:9px;color:var(--ac);font-weight:700;min-width:24px;text-align:right}
+
+/* ── Subhead ── */
+.sh{font-size:10px;color:var(--blu);letter-spacing:.5px;text-transform:uppercase;
+  font-weight:700;margin:7px 0 3px;display:flex;align-items:center;gap:5px}
+.sh::before{content:"";width:2px;height:10px;background:var(--blu);border-radius:2px}
+
+/* ── Info box ── */
+.infobox{border-radius:var(--r2);padding:6px 8px;margin-bottom:7px;
+  font-size:11px;line-height:1.5}
+.infobox.ac{background:var(--acsoft);border:1px solid rgba(79,255,176,.2);color:var(--ac)}
+.infobox.yel{background:rgba(255,202,69,.08);border:1px solid rgba(255,202,69,.2);color:var(--yel)}
+.infobox.pur{background:rgba(180,124,255,.08);border:1px solid rgba(180,124,255,.2);color:var(--pur)}
+
+/* ── HS pill ── */
+.hs-pill{display:flex;align-items:center;gap:8px;
+  background:rgba(180,124,255,.07);border:1px solid rgba(180,124,255,.2);
+  border-radius:var(--r);padding:6px 9px;margin-bottom:7px;
+  cursor:pointer;transition:.14s;user-select:none}
+.hs-pill:hover{background:rgba(180,124,255,.14);border-color:rgba(180,124,255,.35)}
+.hs-pill .sw{width:26px;height:14px}
+.hs-pill .sw::after{width:8px;height:8px;top:3px;left:3px}
+.hs-pill .sw.on::after{left:15px}
+
+/* ── Option topbar (always-visible) ── */
+.opt-sep{width:1px;height:18px;background:var(--line2);margin:0 4px}
+.opt-wrap{display:flex;align-items:center;gap:4px}
+.opt-wrap label{font-size:10px;color:var(--tx3);text-transform:uppercase;font-weight:600;white-space:nowrap}
+#optSel{background:var(--panel2);border:1px solid var(--line);border-radius:20px;
+  padding:3px 9px;color:var(--tx);font-size:11px;outline:none;cursor:pointer;max-width:130px}
+#optSel option{background:var(--panel2)}
+.opt-add{display:flex;align-items:center;gap:0;border:1px solid var(--line);
+  border-radius:20px;overflow:hidden;height:24px}
+.opt-add input{background:var(--panel2);border:none;padding:0 8px;color:var(--tx);
+  font-size:11px;outline:none;width:100px;font-family:inherit}
+.opt-add input::placeholder{color:var(--tx3)}
+.opt-add button{background:rgba(255,140,66,.15);border:none;border-left:1px solid var(--line);
+  color:var(--ora);padding:0 9px;font-size:11px;cursor:pointer;height:100%;
+  font-family:inherit;white-space:nowrap;transition:.12s}
+.opt-add button:hover{background:rgba(255,140,66,.28)}
+.opt-del{background:transparent;border:1px solid transparent;border-radius:20px;
+  color:var(--tx3);padding:2px 6px;font-size:11px;cursor:pointer;transition:.12s}
+.opt-del:hover{color:var(--red);border-color:rgba(255,95,114,.3)}
+
+/* ── Content area ── */
+.content{display:flex;flex-direction:column;flex:1;overflow:hidden;background:var(--bg)}
+.actions{display:flex;align-items:center;gap:6px;padding:8px 12px;
+  border-bottom:1px solid var(--line);background:var(--panel);flex:none}
+.btn{display:flex;align-items:center;gap:5px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--tx);padding:5px 11px;border-radius:var(--r2);
+  font-size:12px;font-weight:600;cursor:pointer;transition:.12s;font-family:inherit;user-select:none}
+.btn:hover:not(:disabled){border-color:var(--line2);background:var(--field)}
+.btn:active:not(:disabled){transform:scale(.98)}
+.btn:disabled{opacity:.3;cursor:not-allowed}
+.btn.pri{background:var(--ac);border-color:var(--ac);color:#04120a;font-weight:700}
+.btn.pri:hover:not(:disabled){background:var(--ac2);border-color:var(--ac2)}
+.btn.dng{color:var(--red);border-color:rgba(255,95,114,.25)}
+.btn.dng:hover:not(:disabled){background:rgba(255,95,114,.07)}
+
+/* ── Stats ── */
+.stats{display:flex;gap:6px;padding:8px 12px 0;flex:none}
+.stat{flex:1;background:var(--panel2);border:1px solid var(--line);
+  border-radius:var(--r);padding:7px 10px}
+.stat .v{font-size:18px;font-weight:700;letter-spacing:-.5px;line-height:1.1}
+.stat .l{font-size:9px;color:var(--tx3);letter-spacing:.8px;
+  text-transform:uppercase;margin-top:2px;font-weight:600}
+.stat .v.ac{color:var(--ac)}.stat .v.red{color:var(--red)}.stat .v.blu{color:var(--blu)}
+
+/* ── Progress ── */
+.prog{padding:8px 12px 4px;flex:none}
+.pbar{height:4px;background:var(--field);border-radius:3px;overflow:hidden}
+.pfill{height:100%;width:0;
+  background:linear-gradient(90deg,var(--ac),#00d4ff);
+  border-radius:3px;transition:width .35s ease}
+.pmeta{display:flex;justify-content:space-between;
+  font-size:10px;color:var(--tx2);margin-top:4px}
+
+/* ── Pipeline status badge ── */
+.pipe-status{display:flex;align-items:center;gap:5px;padding:4px 12px;
+  flex:none;border-bottom:1px solid var(--line);
+  background:linear-gradient(90deg,var(--panel),transparent)}
+.pipe-dot{width:5px;height:5px;border-radius:50%}
+.pipe-dot.cuda{background:var(--ac);box-shadow:0 0 5px var(--ac)}
+.pipe-dot.cpu{background:var(--blu)}
+.pipe-txt{font-size:10px;color:var(--tx3);letter-spacing:.2px}
+.pipe-txt b{color:var(--tx2)}
+
+/* ── File list ── */
+.flist{flex:1;overflow-y:auto;padding:4px 12px 10px}
+.empty{height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:8px;color:var(--tx3);font-size:12px}
+.fi{display:flex;align-items:center;gap:7px;padding:6px 9px;
+  border-radius:var(--r2);border:1px solid var(--line);
+  margin-bottom:4px;background:var(--panel2);transition:.12s}
+.fi.proc{border-color:var(--blu);background:rgba(79,168,255,.04)}
+.fi.ok{border-color:rgba(79,255,176,.3);background:rgba(79,255,176,.03)}
+.fi.err{border-color:rgba(255,95,114,.3);background:rgba(255,95,114,.03)}
+.fi .ic{font-size:12px;flex:none}
+.fi .nm{flex:1;font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx)}
+.fi .sz{font-size:10px;color:var(--tx3);min-width:50px;text-align:right}
+.fi .bar2{width:52px;height:3px;background:var(--field);border-radius:3px;overflow:hidden}
+.fi .bar2 i{display:block;height:100%;width:0;
+  background:linear-gradient(90deg,var(--ac),#00d4ff);transition:width .2s}
+.fi .st{font-size:10px;min-width:44px;text-align:right;color:var(--tx3)}
+.fi .tm{font-size:10px;color:var(--tx3);min-width:28px;text-align:right}
+.fi .md{font-size:9px;color:var(--blu);min-width:22px;text-align:center}
+
+/* ── Console ── */
+.console{background:#040610;border-top:1px solid var(--line);
+  display:flex;flex-direction:column;height:150px;flex:none}
+.chead{display:flex;align-items:center;gap:6px;padding:5px 12px;
+  border-bottom:1px solid var(--line);font-size:11px;color:var(--tx2);
+  font-weight:600;flex:none}
+.cdot{width:6px;height:6px;border-radius:50%;background:var(--ac);
+  box-shadow:0 0 5px var(--ac);animation:blink 2s infinite}
+.cdot.idle{background:var(--tx3);box-shadow:none;animation:none}
+.cbody{flex:1;overflow-y:auto;padding:5px 12px;font-size:11px;line-height:1.5}
+.cbody .ll{display:flex;gap:6px}
+.cbody .ll .t{color:var(--tx3);flex:none;font-size:10px}
+.cbody .info{color:var(--blu)}.cbody .ok{color:var(--ac)}
+.cbody .err{color:var(--red)}.cbody .warn{color:var(--yel)}
+
+/* ── Modal ── */
+.ov{position:fixed;inset:0;background:rgba(4,6,12,.80);
+  display:none;align-items:center;justify-content:center;z-index:50}
+.ov.show{display:flex}
+.modal{background:var(--panel);border:1px solid var(--line2);
+  border-radius:10px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.7)}
+.mhead{display:flex;align-items:center;gap:8px;padding:10px 13px;
+  border-bottom:1px solid var(--line);font-size:13px;font-weight:600}
+.mx{margin-left:auto;cursor:pointer;color:var(--tx3);font-size:13px;
+  padding:2px 5px;border-radius:3px;transition:.1s}
+.mx:hover{color:var(--tx);background:var(--field)}
+
+/* Preset select in topbar */
+#presetSel{background:var(--panel2);border:1px solid var(--line);
+  border-radius:20px;padding:3px 9px;color:var(--tx);font-size:11px;
+  outline:none;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- ── Topbar ── -->
+<div class="bar">
+  <div class="brand">
+    <div class="logo-mark">W</div>
+    <div class="name">Watermark Studio</div>
+    <div class="ver">v7</div>
+  </div>
+
+  <!-- Preset selector -->
+  <div style="display:flex;align-items:center;gap:5px;margin-left:6px">
+    <label style="font-size:10px;color:var(--tx3);text-transform:uppercase;font-weight:600">Preset</label>
+    <select id="presetSel" onchange="applyPreset()"></select>
+  </div>
+
+  <!-- Option selector (always visible) -->
+  <div class="opt-sep"></div>
+  <div class="opt-wrap">
+    <label>Option</label>
+    <select id="optSel" onchange="applyOptionFromSel()">
+      <option value="">— chọn —</option>
+    </select>
+    <button class="opt-del" id="optDelBtn" onclick="deleteCurrentOption()" title="Xóa option" style="display:none">✕</button>
+    <div class="opt-add">
+      <input id="optName" placeholder="Tên option…" maxlength="30"
+        onkeydown="if(event.key==='Enter')saveOption()">
+      <button onclick="saveOption()">💾 Lưu</button>
+    </div>
+  </div>
+
+  <div class="pipeline-tag">overlay_cuda AUTO</div>
+  <div class="grow"></div>
+  <div class="tbtn" onclick="openFflog()">📋 Log</div>
+  <div class="tbtn" id="benchBtn" onclick="runBenchmark()">⚡ Test GPU</div>
+</div>
+
+<div class="main-wrap">
+
+<!-- ── Sidebar ── -->
+<div class="side" id="sidebar">
+  <div class="resize-handle" id="resizeHandle"></div>
+  <div class="side-tabs">
+    <div class="stab act" onclick="switchTab(0)">📁 Nguồn</div>
+    <div class="stab" onclick="switchTab(1)">🖼️ Logo</div>
+    <div class="stab" onclick="switchTab(2)">⚙️ Encode</div>
+    <div class="stab" onclick="switchTab(3)">⬆️ Upload</div>
+  </div>
+
+  <!-- ── Tab 0: Nguồn ── -->
+  <div class="tab-body act" id="tab0">
+    <div class="fld"><label>Input folder</label>
+      <div class="with-btn"><input id="inputFolder" placeholder="Chọn thư mục…">
+      <button class="mini" onclick="pickInput()">Chọn</button></div></div>
+    <div class="fld"><label>Output folder</label>
+      <div class="with-btn"><input id="outputFolder" value="output_videos">
+      <button class="mini" onclick="pickOutput()">Chọn</button></div></div>
+    <div class="fld"><label>ffmpeg.exe</label>
+      <div class="with-btn"><input id="ffmpegPath" placeholder="Chọn ffmpeg.exe…">
+      <button class="mini" onclick="pickFFmpeg()">Chọn</button></div></div>
+    <div class="row r2">
+      <div class="fld" style="flex:1"><label>Suffix</label><input id="outputSuffix" value="_vnclip"></div>
+    </div>
+    <div style="display:flex;gap:4px;margin:4px 0 8px">
+      <button class="mini" style="flex:1;padding:6px" onclick="scanFolder()">🔍 Quét file</button>
+      <button class="mini" style="flex:1;padding:6px" onclick="clearFiles()">✕ Xoá</button>
+    </div>
+
+    <div class="card open">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="hl">✂️ Cắt &amp; Chia</span><span class="arr">›</span></header>
+      <div class="body">
+        <div class="row r2">
+          <div class="fld"><label>Cắt đầu (s)</label>
+            <input type="number" id="trimStart" value="0" min="0"></div>
+          <div class="fld"><label>Chia (phần)</label>
+            <input type="number" id="splitParts" value="1" min="1" max="20"></div>
+        </div>
+        <div class="row r2">
+          <div class="fld"><label>Chèn logo sau (s)</label>
+            <input type="number" id="enableTime" value="8" min="0"></div>
+        </div>
+        <div class="swrow">
+          <div class="lbl">Giới hạn logo video dài<small>Chỉ chèn logo % đầu</small></div>
+          <div class="sw yel" id="tglLogoLimit" onclick="tgl(this)"></div></div>
+        <div class="row r2" style="margin-top:5px">
+          <div class="fld"><label>Ngưỡng (s)</label>
+            <input type="number" id="threshold" value="300" min="30"></div>
+          <div class="fld"><label>% đầu</label>
+            <input type="number" id="encodeRatioPct" value="20" min="5" max="100" step="5"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="hl">🎬 Outro</span>
+        <span style="font-size:10px;color:var(--tx3);margin-left:auto;margin-right:6px">tùy chọn</span>
+        <div class="sw yel" id="tglOutro" onclick="tgl(this);syncEl('outroBody','tglOutro')"></div>
+        <span class="arr">›</span></header>
+      <div class="body" id="outroBody" style="display:none">
+        <div class="fld"><label>Nội dung</label>
+          <textarea id="outroText" rows="2">Cảm ơn đã xem!</textarea></div>
+        <div class="row r2">
+          <div class="fld"><label>Thời lượng (s)</label>
+            <input type="number" id="outroDuration" value="5" min="2" max="30" step="0.5"></div>
+          <div class="fld"><label>Cỡ chữ</label>
+            <input type="number" id="outroFontSize" value="36" min="16" max="80"></div>
+        </div>
+        <div class="fld"><label>Màu nền</label><input id="outroBgColor" value="#d2dcff"></div>
+        <div class="fld"><label>Ảnh QR</label>
+          <div class="with-btn"><input id="qrFile" value="QR.png">
+          <button class="mini" onclick="pickQr()">Chọn</button></div></div>
+        <button class="mini" style="width:100%;padding:6px;margin-top:3px"
+          onclick="previewOutro()">▶ Preview outro</button>
+      </div>
+    </div>
+  </div><!-- /tab0 -->
+
+  <!-- ── Tab 1: Logo ── -->
+  <div class="tab-body" id="tab1">
+
+    <!-- HS preset pill -->
+    <div class="hs-pill" onclick="toggleHs()">
+      <div class="sw pur" id="tglHs"></div>
+      <span style="font-size:12px;font-weight:700;color:var(--pur)">Preset Học Sinh</span>
+      <span style="font-size:10px;color:var(--tx3);margin-left:auto" id="hsLabel">TẮT</span>
+    </div>
+    <div id="hsPanel" style="display:none">
+      <div class="card open">
+        <header onclick="this.parentElement.classList.toggle('open')">
+          <span class="hl">⚙️ Cấu hình HS</span><span class="arr">›</span></header>
+        <div class="body">
+          <div class="sh">DVD bounce</div>
+          <div class="swrow"><div class="lbl">Bật DVD</div>
+            <div class="sw pur" id="tglDvd" onclick="tgl(this)"></div></div>
+          <div class="row r3" style="margin-top:5px">
+            <div class="fld"><label>Text</label><input id="dvdText" value="t.me/VnKong"></div>
+            <div class="fld"><label>Cỡ</label><input type="number" id="dvdSize" value="22" min="8"></div>
+            <div class="fld"><label>Alpha</label><input type="number" id="dvdOpacity" value="0.10" step="0.01" min="0" max="1"></div>
+          </div>
+          <div class="sh">Chạy ngang</div>
+          <div class="swrow"><div class="lbl">Bật</div>
+            <div class="sw pur" id="tglMoving" onclick="tgl(this)"></div></div>
+          <div class="row r2" style="margin-top:5px">
+            <div class="fld"><label>Text</label><input id="movingText" value="t.me/rauhong"></div>
+            <div class="fld"><label>Alpha</label><input type="number" id="movingOpacity" value="0.05" step="0.01" min="0" max="1"></div>
+          </div>
+          <div class="sh">Chữ giữa fade</div>
+          <div class="swrow"><div class="lbl">Bật fade</div>
+            <div class="sw pur" id="tglCenterFade" onclick="tgl(this)"></div></div>
+          <div class="row r2" style="margin-top:5px">
+            <div class="fld"><label>Fade in (s)</label>
+              <input type="number" id="fadeIn" value="1.5" step="0.5" min="0"></div>
+            <div class="fld"><label>Hold (s)</label>
+              <input type="number" id="fadeHold" value="3" step="0.5" min="0"></div>
+          </div>
+          <div class="row r2">
+            <div class="fld"><label>Fade out (s)</label>
+              <input type="number" id="fadeOut" value="1.5" step="0.5" min="0"></div>
+            <div class="fld"><label>Ẩn (s)</label>
+              <input type="number" id="hideDur" value="5" step="0.5" min="0"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logo chính -->
+    <div class="card open">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="hl">🖼️ Logo chính</span><span class="arr">›</span></header>
+      <div class="body">
+        <div class="fld">
+          <div class="with-btn">
+            <input id="logoFile" value="logo.png" placeholder="logo.png">
+            <button class="mini" onclick="pickLogo()">Chọn</button></div></div>
+        <div class="fld sl">
+          <label>Bề ngang <span class="val" id="logoWVal">160</span>px</label>
+          <input type="range" min="40" max="500" value="160" id="logoW"
+            oninput="$('logoWVal').textContent=this.value"></div>
+        <div class="fld sl">
+          <label>Độ mờ <span class="val" id="logoOpVal">1.00</span>
+          </label>
+          <input type="range" min="0" max="100" value="100" id="logoOp"
+            oninput="updateLogoOp()"></div>
+        <div class="row r2">
+          <div class="fld"><label>Lề X</label>
+            <input type="number" id="marginX" value="15" min="0"></div>
+          <div class="fld"><label>Lề Y</label>
+            <input type="number" id="marginY" value="15" min="0"></div>
+        </div>
+        <div class="fld"><label>Font chữ</label>
+          <div class="with-btn">
+            <input id="fontFile" placeholder="(dùng mặc định hệ thống)" style="font-size:10px">
+            <button class="mini" onclick="pickFont()">Chọn</button></div></div>
+      </div>
+    </div>
+
+    <!-- 4 góc PNG -->
+    <div class="card open">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="hl">📌 Logo 4 góc</span>
+        <span id="cudaBadge" style="font-size:9px;background:var(--acsoft);color:var(--ac);
+          padding:1px 6px;border-radius:10px;margin-left:6px">⚡ CUDA</span>
+        <span class="arr">›</span></header>
+      <div class="body">
+        <div class="infobox ac" id="cudaInfo">
+          ⚡ <b>overlay_cuda</b> (~28-35x) — mọi opacity đều giữ CUDA. Chỉ bật chữ giữa mới chuyển CPU (~13x).
+        </div>
+        <div class="logo-grid">
+          <!-- TL -->
+          <div class="logo-box">
+            <div class="logo-box-head">
+              <div class="sw" id="tglTL" onclick="tgl(this);updateCudaHint()"></div>
+              <span class="logo-box-label">↖ Trái trên</span>
+            </div>
+            <div class="path-row">
+              <input type="text" id="logoTL" placeholder="logo_tl.png">
+              <button onclick="pickCornerLogo('TL')">Chọn</button>
+            </div>
+            <div class="ctrl-row">
+              <span>W</span>
+              <input type="range" min="20" max="400" value="120" id="logoTLW"
+                oninput="$('logoTLWv').textContent=this.value">
+              <span class="val" id="logoTLWv">120</span>
+            </div>
+            <div class="ctrl-row">
+              <span>Mờ</span>
+              <input type="range" min="0" max="100" value="100" id="logoTLOp"
+                oninput="$('logoTLOpv').textContent=(this.value/100).toFixed(2);updateCudaHint()">
+              <span class="val" id="logoTLOpv">1.00</span>
+            </div>
+            <div class="ctrl-row" style="gap:4px;margin-top:2px">
+              <span style="font-size:9px;color:var(--tx3)">X</span>
+              <input type="number" id="logoTLX" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+              <span style="font-size:9px;color:var(--tx3)">Y</span>
+              <input type="number" id="logoTLY" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+            </div>
+          </div>
+          <!-- TR -->
+          <div class="logo-box">
+            <div class="logo-box-head">
+              <div class="sw" id="tglTR" onclick="tgl(this);updateCudaHint()"></div>
+              <span class="logo-box-label">Phải trên ↗</span>
+            </div>
+            <div class="path-row">
+              <input type="text" id="logoTR" placeholder="logo_tr.png">
+              <button onclick="pickCornerLogo('TR')">Chọn</button>
+            </div>
+            <div class="ctrl-row">
+              <span>W</span>
+              <input type="range" min="20" max="400" value="120" id="logoTRW"
+                oninput="$('logoTRWv').textContent=this.value">
+              <span class="val" id="logoTRWv">120</span>
+            </div>
+            <div class="ctrl-row">
+              <span>Mờ</span>
+              <input type="range" min="0" max="100" value="100" id="logoTROp"
+                oninput="$('logoTROpv').textContent=(this.value/100).toFixed(2);updateCudaHint()">
+              <span class="val" id="logoTROpv">1.00</span>
+            </div>
+            <div class="ctrl-row" style="gap:4px;margin-top:2px">
+              <span style="font-size:9px;color:var(--tx3)">X</span>
+              <input type="number" id="logoTRX" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+              <span style="font-size:9px;color:var(--tx3)">Y</span>
+              <input type="number" id="logoTRY" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+            </div>
+          </div>
+          <!-- BL -->
+          <div class="logo-box">
+            <div class="logo-box-head">
+              <div class="sw" id="tglBL" onclick="tgl(this);updateCudaHint()"></div>
+              <span class="logo-box-label">↙ Trái dưới</span>
+            </div>
+            <div class="path-row">
+              <input type="text" id="logoBL" placeholder="logo_bl.png">
+              <button onclick="pickCornerLogo('BL')">Chọn</button>
+            </div>
+            <div class="ctrl-row">
+              <span>W</span>
+              <input type="range" min="20" max="400" value="120" id="logoBLW"
+                oninput="$('logoBLWv').textContent=this.value">
+              <span class="val" id="logoBLWv">120</span>
+            </div>
+            <div class="ctrl-row">
+              <span>Mờ</span>
+              <input type="range" min="0" max="100" value="100" id="logoBLOp"
+                oninput="$('logoBLOpv').textContent=(this.value/100).toFixed(2);updateCudaHint()">
+              <span class="val" id="logoBLOpv">1.00</span>
+            </div>
+            <div class="ctrl-row" style="gap:4px;margin-top:2px">
+              <span style="font-size:9px;color:var(--tx3)">X</span>
+              <input type="number" id="logoBLX" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+              <span style="font-size:9px;color:var(--tx3)">Y</span>
+              <input type="number" id="logoBLY" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+            </div>
+          </div>
+          <!-- BR -->
+          <div class="logo-box">
+            <div class="logo-box-head">
+              <div class="sw" id="tglBR" onclick="tgl(this);updateCudaHint()"></div>
+              <span class="logo-box-label">Phải dưới ↘</span>
+            </div>
+            <div class="path-row">
+              <input type="text" id="logoBR" placeholder="logo_br.png">
+              <button onclick="pickCornerLogo('BR')">Chọn</button>
+            </div>
+            <div class="ctrl-row">
+              <span>W</span>
+              <input type="range" min="20" max="400" value="120" id="logoBRW"
+                oninput="$('logoBRWv').textContent=this.value">
+              <span class="val" id="logoBRWv">120</span>
+            </div>
+            <div class="ctrl-row">
+              <span>Mờ</span>
+              <input type="range" min="0" max="100" value="100" id="logoBROp"
+                oninput="$('logoBROpv').textContent=(this.value/100).toFixed(2);updateCudaHint()">
+              <span class="val" id="logoBROpv">1.00</span>
+            </div>
+            <div class="ctrl-row" style="gap:4px;margin-top:2px">
+              <span style="font-size:9px;color:var(--tx3)">X</span>
+              <input type="number" id="logoBRX" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+              <span style="font-size:9px;color:var(--tx3)">Y</span>
+              <input type="number" id="logoBRY" value="15" min="0" style="width:44px;font-size:10px;padding:2px 4px">
+            </div>
+          </div>
+        </div><!-- /logo-grid -->
+        <button class="mini" style="width:100%;padding:5px;margin-top:4px;margin-bottom:2px"
+          onclick="snapPreview()">📸 Xem thử vị trí logo (xuất 1 frame)</button>
+
+        <!-- Chữ watermark giữa -->
+        <div class="sh">Chữ watermark giữa</div>
+        <div class="swrow">
+          <div class="lbl">Bật chữ giữa
+            <small>Bật → dùng CPU overlay (drawtext không chạy trên CUDA)</small></div>
+          <div class="sw" id="tglCenter" onclick="tgl(this);updateCudaHint()"></div>
+        </div>
+        <div style="margin-top:6px">
+          <div class="fld">
+            <input type="text" id="centerText" value="t.me/VnKong" placeholder="Chữ giữa..."></div>
+          <div class="row r2">
+            <div class="fld"><label>Cỡ</label>
+              <input type="number" id="centerSize" value="25" min="8"></div>
+            <div class="fld"><label>Alpha</label>
+              <input type="number" id="centerOpacity" value="0.15" step="0.05" min="0" max="1"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /tab1 -->
+
+  <!-- ── Tab 2: Encode ── -->
+  <div class="tab-body" id="tab2">
+    <div class="card open">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
+      <div class="body">
+        <div class="infobox ac">
+          🚀 <b>overlay_cuda</b> mọi opacity — CUDA (~28-35x). Chỉ bật chữ giữa mới fallback CPU (~13x)
+        </div>
+        <div class="row r2">
+          <div class="fld"><label>Chất lượng (CQ)</label>
+            <select id="cqVal">
+              <option>18</option><option>20</option><option>21</option>
+              <option selected>23</option><option>25</option><option>28</option>
+            </select></div>
+          <div class="fld"><label>NVENC preset</label>
+            <select id="presetVal">
+              <option selected>p1</option><option>p2</option><option>p3</option>
+              <option>p4</option><option>p5</option>
+            </select></div>
+        </div>
+        <div class="row r2">
+          <div class="fld"><label>GPU workers</label>
+            <select id="workersVal" onchange="$('nvencSessions').value=this.value">
+              <option>1</option><option>2</option><option>3</option>
+              <option>4</option><option selected>5</option><option>6</option><option>8</option>
+            </select></div>
+          <div class="fld"><label>Min output (KB)</label>
+            <input type="number" id="minSize" value="50" min="1"></div>
+        </div>
+        <!-- hidden fields kept for compat -->
+        <select id="nvencSessions" style="display:none"><option value="5" selected>5</option></select>
+        <select id="cpuWorkersVal" style="display:none"><option selected>0</option></select>
+        <div class="swrow">
+          <div class="lbl">Bỏ qua file đã có output</div>
+          <div class="sw on" id="tglSkip" onclick="tgl(this)"></div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /tab2 -->
+
+  <!-- ── Tab 3: Upload ── -->
+  <div class="tab-body" id="tab3">
+    <div class="card open">
+      <header onclick="this.parentElement.classList.toggle('open')">
+        <span class="hl">⬆️ Telegram Desktop</span><span class="arr">›</span></header>
+      <div class="body">
+        <div class="infobox yel">
+          ⚠️ Mở Telegram Desktop, <b>click sẵn vào chat đích</b> trước khi chạy.
+        </div>
+        <div class="swrow">
+          <div class="lbl">Bật auto upload</div>
+          <div class="sw yel" id="tglAutoUpload"
+            onclick="tgl(this);syncEl('upOpts','tglAutoUpload')"></div>
+        </div>
+        <div id="upOpts" style="display:none;margin-top:7px">
+          <div class="swrow">
+            <div class="lbl">Chế độ album
+              <small>BẬT: gộp tất cả · TẮT: từng file</small></div>
+            <div class="sw blu" id="tglAlbumMode" onclick="tgl(this)"></div>
+          </div>
+          <div class="row r2" style="margin-top:6px">
+            <div class="fld"><label>Phím gửi</label>
+              <select id="upSendKey">
+                <option value="enter" selected>Enter</option>
+                <option value="ctrl_enter">Ctrl+Enter</option>
+              </select></div>
+            <div class="fld"><label>Max / album</label>
+              <input type="number" id="albumMax" value="10" min="1" max="10"></div>
+          </div>
+          <div class="row r2">
+            <div class="fld"><label>Chờ dialog (s)</label>
+              <input type="number" id="upDialogWait" value="1.0" step="0.1" min="0.3"></div>
+            <div class="fld"><label>Delay file (s)</label>
+              <input type="number" id="upDelay" value="0.5" step="0.1" min="0"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /tab3 -->
+
+</div><!-- /side -->
+
+<!-- ── Content ── -->
+<div class="content">
+  <div class="actions">
+    <button class="btn" onclick="saveConfig()">💾 Lưu preset</button>
+    <div class="grow"></div>
+    <button class="mini" id="copyErrBtn" style="display:none;color:var(--red);
+      border-color:rgba(255,95,114,.3)" onclick="copyLastErr()">📋 Copy lỗi</button>
+    <button class="btn dng" id="cancelBtn" onclick="cancelProcess()" disabled>⬛ Dừng</button>
+    <button class="btn pri" id="runBtn" onclick="startProcess()">▶ Chạy</button>
+  </div>
+
+  <!-- Pipeline status live -->
+  <div class="pipe-status" id="pipeStatus">
+    <div class="pipe-dot cuda" id="pipeDot"></div>
+    <span class="pipe-txt" id="pipeTxt"><b>overlay_cuda</b> — FULL GPU, không chữ giữa</span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="v ac" id="sTotal">0</div><div class="l">Tổng</div></div>
+    <div class="stat"><div class="v ac" id="sOk">0</div><div class="l">OK</div></div>
+    <div class="stat"><div class="v red" id="sErr">0</div><div class="l">Lỗi</div></div>
+    <div class="stat"><div class="v blu" id="sSpeed">—</div><div class="l">Tốc độ</div></div>
+    <div class="stat"><div class="v ac" id="sETA">—</div><div class="l">Còn lại</div></div>
+  </div>
+  <div class="prog">
+    <div class="pbar"><div class="pfill" id="mainBar"></div></div>
+    <div class="pmeta"><span id="progLabel">Sẵn sàng</span><span id="progPct">0%</span></div>
+  </div>
+  <div class="flist" id="fileList">
+    <div class="empty" id="emptyState">
+      <span style="font-size:28px;opacity:.15">🎬</span>
+      Chọn thư mục Input → bấm Quét file
+    </div>
+  </div>
+</div>
+</div><!-- /main-wrap -->
+
+<!-- ── Console ── -->
+<div class="console">
+  <div class="chead">
+    <div class="cdot idle" id="logDot"></div>
+    <span>Nhật ký</span>
+    <div class="grow"></div>
+    <button class="mini" id="copyErrBtn2" style="display:none;color:var(--red)"
+      onclick="copyLastErr()">📋 Copy lỗi</button>
+    <button class="mini" onclick="clearLog()">✕ Xoá</button>
+  </div>
+  <div class="cbody" id="logBody"></div>
+</div>
+</div><!-- /app -->
+
+<!-- ── FFmpeg log modal ── -->
+<div class="ov" id="fflogOv" onclick="if(event.target===this)closeFflog()">
+  <div class="modal" style="width:780px;height:500px;display:flex;flex-direction:column">
+    <div class="mhead">📋 FFmpeg Log
+      <div class="grow"></div>
+      <label style="font-size:11px;color:var(--tx2);display:flex;align-items:center;gap:5px;cursor:pointer">
+        Auto scroll
+        <div class="sw on" id="tglAutoScroll" style="width:26px;height:14px"
+          onclick="tgl(this)"></div></label>
+      <button class="mini" style="margin-left:7px" onclick="copyFflog()">Copy</button>
+      <button class="mini" style="margin-left:3px" onclick="clearFflog()">Xoá</button>
+      <span class="mx" onclick="closeFflog()">✕</span>
+    </div>
+    <div class="cbody" id="fflogBody"
+      style="flex:1;background:#030508;font-size:11px;white-space:pre-wrap;
+      word-break:break-all;font-family:'Cascadia Mono','JetBrains Mono',Consolas,monospace"></div>
+    <div style="padding:4px 12px;border-top:1px solid var(--line);
+      font-size:10px;color:var(--tx3)" id="fflogInfo">0 dòng</div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const v=id=>($( id)?$(id).value.trim():'');
+const vn=id=>parseFloat($(id)?.value)||0;
+const vi=id=>parseInt($(id)?.value)||0;
+const tgl=el=>el.classList.toggle('on');
+const isOn=id=>!!$(id)&&$(id).classList.contains('on');
+function setTgl(id,val){if(!$(id))return;val?$(id).classList.add('on'):$(id).classList.remove('on');}
+function setV(id,val){if(!$(id)||val==null)return;$(id).value=val;}
+function syncEl(elId,tglId){const e=$(elId);if(e)e.style.display=isOn(tglId)?'block':'none';}
+
+let files=[],running=false,barTimers={},lastErrLines=[];
+
+// ── Sidebar resize ──
+(function(){
+  const handle=$('resizeHandle'),sidebar=$('sidebar');
+  let dragging=false,startX=0,startW=0;
+  handle.addEventListener('mousedown',e=>{
+    dragging=true;startX=e.clientX;startW=sidebar.offsetWidth;
+    handle.classList.add('dragging');e.preventDefault();
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    const w=Math.max(230,Math.min(500,startW+(e.clientX-startX)));
+    sidebar.style.width=w+'px';
+  });
+  document.addEventListener('mouseup',()=>{dragging=false;handle.classList.remove('dragging');});
+})();
+
+function switchTab(i){
+  document.querySelectorAll('.stab').forEach((t,j)=>t.classList.toggle('act',j===i));
+  document.querySelectorAll('.tab-body').forEach((t,j)=>t.classList.toggle('act',j===i));
+}
+
+// ── Pipeline status ──
+// Mirror of Python use_cuda_overlay logic:
+// Pipeline A (CUDA) cho moi opacity — chi fallback CPU khi co center text (drawtext = CPU filter).
+function updateCudaHint(){
+  const centerOn=isOn('tglCenter');
+  const useCuda = !centerOn;
+
+  // opacity hint removed: Pipeline A handles alpha via yuva420p+alpha=1, no more CPU fallback for opacity
+  $('cudaHint').style.display='none';
+
+  const dot=$('pipeDot'),txt=$('pipeTxt'),badge=$('cudaBadge'),info=$('cudaInfo');
+  if(useCuda){
+    dot.className='pipe-dot cuda';
+    txt.innerHTML='<b>overlay_cuda</b> — FULL GPU (~28-35x realtime) 🚀';
+    badge.style.display='';
+    if(info){info.className='infobox ac';info.innerHTML='⚡ <b>overlay_cuda</b> (~28-35x) — mọi opacity đều giữ CUDA. Chỉ bật chữ giữa mới chuyển CPU (~13x)';}
+  }else{
+    dot.className='pipe-dot cpu';
+    txt.innerHTML='<b>CPU overlay</b> — chữ giữa bật → (~13x realtime)';
+    badge.style.display='none';
+    if(info){info.className='infobox yel';info.innerHTML='⚠ Đang dùng CPU overlay (~13x) vì chữ giữa bật (drawtext). Tắt chữ giữa để quay lại CUDA.';}
+  }
+}
+
+function updateLogoOp(){
+  const val=parseInt($('logoOp').value);
+  $('logoOpVal').textContent=(val/100).toFixed(2);
+  updateCudaHint();
+}
+
+// ── HS preset ──
+let hsActive=false;
+function toggleHs(){
+  hsActive=!hsActive;
+  setTgl('tglHs',hsActive);
+  $('hsLabel').textContent=hsActive?'BẬT':'TẮT';
+  $('hsPanel').style.display=hsActive?'block':'none';
+}
+
+// ── Corner logo picker ──
+async function pickCornerLogo(corner){
+  const r=await pywebview.api.pick_logo();
+  if(r){setV('logo'+corner,r);log('Logo '+corner+': '+r);}
+}
+
+async function snapPreview(){
+  log('Đang xuất frame xem thử...','info');
+  try{
+    const r=await pywebview.api.snap_preview(JSON.stringify(getConfig()));
+    if(r.ok) log('📸 Đã mở ảnh xem thử: '+r.path,'ok');
+    else log('Lỗi xem thử: '+r.msg,'err');
+  }catch(e){log('Lỗi: '+e,'err');}
+}
+
+// ── Backend events ──
+window._backend=function(ev,d){
+  switch(ev){
+    case 'log':log(d.msg,d.cls||'');break;
+    case 'total':$('sTotal').textContent=d.total;break;
+    case 'file_start':fileStart(d);break;
+    case 'file_done':fileDone(d);break;
+    case 'progress':onProgress(d);break;
+    case 'done':onDone(d);break;
+  }
+};
+function fileStart(d){
+  stopBar(d.idx);
+  const el=$(`fi-${d.idx}`);if(el)el.className='fi proc';
+  barTimers[d.idx]=setInterval(()=>{
+    const b=$(`fib-${d.idx}`);if(!b)return;
+    b.style.width=Math.min((parseFloat(b.style.width)||0)+Math.random()*5+2,90)+'%';
+  },200);
+}
+function stopBar(idx){clearInterval(barTimers[idx]);const b=$(`fib-${idx}`);if(b)b.style.width='100%';}
+function fileDone(d){
+  stopBar(d.idx);
+  const el=$(`fi-${d.idx}`);if(el)el.className='fi '+(d.status==='ok'?'ok':'err');
+  const st=$(`fis-${d.idx}`);if(st){st.textContent=d.label;st.style.color=d.status==='ok'?'var(--ac)':'var(--red)';}
+  const tm=$(`fit-${d.idx}`);if(tm&&d.encode_time!=null)tm.textContent=d.encode_time+'s';
+  const md=$(`fim-${d.idx}`);if(md&&d.mode)md.textContent=d.mode;
+}
+function onProgress(d){
+  const pct=Math.round(d.done/d.total*100);
+  $('mainBar').style.width=pct+'%';$('progPct').textContent=pct+'%';
+  $('progLabel').textContent=d.done+'/'+d.total;
+  $('sOk').textContent=d.ok;$('sErr').textContent=d.err;
+  $('sSpeed').textContent=d.speed>0?d.speed.toFixed(1)+'x':'—';
+  $('sETA').textContent=d.eta>0?d.eta+'s':'—';
+}
+function onDone(d){
+  running=false;$('runBtn').disabled=false;$('cancelBtn').disabled=true;
+  $('logDot').classList.add('idle');
+  $('mainBar').style.width='100%';$('progPct').textContent='100%';
+  $('progLabel').textContent=d.ok>0?'✅ Hoàn tất':'❌ Lỗi';
+}
+
+// ── Picks ──
+async function pickLogo(){const r=await pywebview.api.pick_logo();if(r){setV('logoFile',r);log('Logo: '+r);}}
+async function pickFont(){const r=await pywebview.api.pick_font();if(r)setV('fontFile',r);}
+async function pickInput(){const r=await pywebview.api.pick_input_folder();if(r){setV('inputFolder',r);await scanFolder();}}
+async function pickOutput(){const r=await pywebview.api.pick_output_folder();if(r)setV('outputFolder',r);}
+async function pickFFmpeg(){const r=await pywebview.api.pick_ffmpeg();if(r){setV('ffmpegPath',r);log('ffmpeg: '+r,'ok');}}
+async function pickQr(){const r=await pywebview.api.pick_qr();if(r){setV('qrFile',r);log('QR: '+r);}}
+
+// ── File scan ──
+async function scanFolder(){
+  const f=v('inputFolder');if(!f){log('Chưa chọn thư mục input','warn');return;}
+  files=await pywebview.api.scan_folder(f);
+  renderFiles();$('sTotal').textContent=files.length;
+  log('Tìm thấy '+files.length+' file',files.length?'ok':'warn');
+}
+function clearFiles(){files=[];renderFiles();$('sTotal').textContent=0;}
+function renderFiles(){
+  const fl=$('fileList'),es=$('emptyState');
+  if(!files.length){fl.innerHTML='';fl.appendChild(es);es.style.display='flex';return;}
+  es.style.display='none';fl.innerHTML='';
+  const imgs=new Set(['jpg','jpeg','png']);
+  files.forEach((f,i)=>{
+    const d=document.createElement('div');d.className='fi';d.id='fi-'+i;
+    d.innerHTML='<span class="ic">'+(imgs.has(f.ext)?'🖼':'🎬')+'</span>'
+      +'<span class="nm" title="'+f.name+'">'+f.name+'</span>'
+      +'<span class="sz">'+f.size+'</span>'
+      +'<span class="md" id="fim-'+i+'"></span>'
+      +'<div class="bar2"><i id="fib-'+i+'"></i></div>'
+      +'<span class="st" id="fis-'+i+'">—</span>'
+      +'<span class="tm" id="fit-'+i+'"></span>';
+    fl.appendChild(d);
+  });
+}
+
+// ── getConfig: maps UI fields → Python keys ──
+function getConfig(){
+  return {
+    // Paths
+    ffmpeg_path:v('ffmpegPath'),
+    input_folder:v('inputFolder'),
+    output_folder:v('outputFolder'),
+    output_suffix:v('outputSuffix'),
+    temp_dir:'',
+    // Logo chính
+    logo_image:v('logoFile'),
+    logo_scale_w:vi('logoW'),
+    logo_opacity:vn('logoOp')/100,
+    logo_margin_x:vi('marginX'),
+    logo_margin_y:vi('marginY'),
+    font_file:v('fontFile'),
+    // 4 góc
+    enable_tl:isOn('tglTL'), logo_tl:v('logoTL'), logo_tl_w:vi('logoTLW'), logo_tl_op:vn('logoTLOp')/100, logo_tl_x:vi('logoTLX'), logo_tl_y:vi('logoTLY'),
+    enable_tr:isOn('tglTR'), logo_tr:v('logoTR'), logo_tr_w:vi('logoTRW'), logo_tr_op:vn('logoTROp')/100, logo_tr_x:vi('logoTRX'), logo_tr_y:vi('logoTRY'),
+    enable_bl:isOn('tglBL'), logo_bl:v('logoBL'), logo_bl_w:vi('logoBLW'), logo_bl_op:vn('logoBLOp')/100, logo_bl_x:vi('logoBLX'), logo_bl_y:vi('logoBLY'),
+    enable_br:isOn('tglBR'), logo_br:v('logoBR'), logo_br_w:vi('logoBRW'), logo_br_op:vn('logoBROp')/100, logo_br_x:vi('logoBRX'), logo_br_y:vi('logoBRY'),
+    // Chữ giữa
+    enable_center:isOn('tglCenter'),
+    center_text:v('centerText'),
+    center_size:vi('centerSize'),
+    center_opacity:vn('centerOpacity'),
+    // HS preset
+    hs_mode:hsActive,
+    enable_time:vi('enableTime'),
+    enable_center_fade:isOn('tglCenterFade'),
+    fade_in:vn('fadeIn'),
+    hold:vn('fadeHold'),
+    fade_out:vn('fadeOut'),
+    hide_duration:vn('hideDur'),
+    enable_dvd:isOn('tglDvd'),
+    dvd_text:v('dvdText'),
+    dvd_size:vi('dvdSize'),
+    dvd_opacity:vn('dvdOpacity'),
+    enable_moving:isOn('tglMoving'),
+    moving_text:v('movingText'),
+    moving_opacity:vn('movingOpacity'),
+    enable_bouncing:false,
+    // Encode
+    fast_mode:true,
+    nvenc_cq:vi('cqVal'),
+    nvenc_preset:v('presetVal'),
+    gpu_workers:vi('workersVal'),
+    cpu_workers:vi('cpuWorkersVal'),
+    nvenc_sessions:vi('nvencSessions'),
+    min_output_kb:vi('minSize'),
+    skip_done:isOn('tglSkip'),
+    filter_threads:8,
+    // Xử lý
+    trim_start:vi('trimStart'),
+    split_parts:vi('splitParts'),
+    enable_logo_limit:isOn('tglLogoLimit'),
+    long_video_threshold:vi('threshold'),
+    encode_ratio:vi('encodeRatioPct')/100,
+    // Outro
+    enable_outro:isOn('tglOutro'),
+    outro_text:v('outroText'),
+    outro_duration:vn('outroDuration'),
+    outro_bg_color:v('outroBgColor'),
+    outro_font_size:vi('outroFontSize'),
+    qr_image:v('qrFile'),
+    // Upload
+    auto_upload:isOn('tglAutoUpload'),
+    album_mode:isOn('tglAlbumMode'),
+    upload_send_key:v('upSendKey'),
+    upload_dialog_wait:vn('upDialogWait'),
+    album_max:vi('albumMax'),
+    upload_delay:vn('upDelay'),
+  };
+}
+
+// ── applyConfig: Python keys → UI fields ──
+function applyConfig(c){
+  setV('logoFile',c.logo_image||'logo.png');
+  setV('logoW',c.logo_scale_w||160);$('logoWVal').textContent=c.logo_scale_w||160;
+  const op=c.logo_opacity!=null?c.logo_opacity:0.7;
+  setV('logoOp',Math.round(op*100));$('logoOpVal').textContent=op.toFixed(2);
+  setV('marginX',c.logo_margin_x!=null?c.logo_margin_x:15);
+  setV('marginY',c.logo_margin_y!=null?c.logo_margin_y:15);
+  setV('fontFile',c.font_file||'');
+  // 4 góc
+  const corners=[
+    ['TL','tl'],['TR','tr'],['BL','bl'],['BR','br']
+  ];
+  corners.forEach(([UC,lc])=>{
+    setTgl('tgl'+UC,c['enable_'+lc]);
+    setV('logo'+UC,c['logo_'+lc]||'');
+    setV('logo'+UC+'W',c['logo_'+lc+'_w']||120);
+    $('logo'+UC+'Wv').textContent=c['logo_'+lc+'_w']||120;
+    const cop=c['logo_'+lc+'_op']!=null?c['logo_'+lc+'_op']:1.0;
+    setV('logo'+UC+'Op',Math.round(cop*100));
+    $('logo'+UC+'Opv').textContent=cop.toFixed(2);
+    setV('logo'+UC+'X', c['logo_'+lc+'_x']!=null ? c['logo_'+lc+'_x'] : 15);
+    setV('logo'+UC+'Y', c['logo_'+lc+'_y']!=null ? c['logo_'+lc+'_y'] : 15);
+  });
+  // Chữ giữa
+  setTgl('tglCenter',c.enable_center);
+  setV('centerText',c.center_text||'t.me/VnKong');
+  setV('centerSize',c.center_size||25);
+  setV('centerOpacity',c.center_opacity!=null?c.center_opacity:0.15);
+  // HS
+  if(c.hs_mode&&!hsActive)toggleHs();
+  else if(!c.hs_mode&&hsActive)toggleHs();
+  setV('enableTime',c.enable_time!=null?c.enable_time:8);
+  setTgl('tglCenterFade',c.enable_center_fade);
+  setV('fadeIn',c.fade_in||1.5);
+  setV('fadeHold',c.hold||3);
+  setV('fadeOut',c.fade_out||1.5);
+  setV('hideDur',c.hide_duration||5);
+  setTgl('tglDvd',c.enable_dvd);
+  setV('dvdText',c.dvd_text||'t.me/VnKong');
+  setV('dvdSize',c.dvd_size||22);
+  setV('dvdOpacity',c.dvd_opacity!=null?c.dvd_opacity:0.10);
+  setTgl('tglMoving',c.enable_moving);
+  setV('movingText',c.moving_text||'t.me/rauhong');
+  setV('movingOpacity',c.moving_opacity!=null?c.moving_opacity:0.05);
+  // Encode
+  setV('cqVal',c.nvenc_cq||23);
+  setV('presetVal',c.nvenc_preset||'p1');
+  setV('workersVal',c.gpu_workers||5);
+  setV('cpuWorkersVal',c.cpu_workers||0);
+  setV('nvencSessions',c.nvenc_sessions||5);
+  setV('minSize',c.min_output_kb||50);
+  setTgl('tglSkip',c.skip_done!==false);
+  // Cắt & chia
+  setV('trimStart',c.trim_start||0);
+  setV('splitParts',c.split_parts||1);
+  setTgl('tglLogoLimit',c.enable_logo_limit);
+  setV('threshold',c.long_video_threshold||300);
+  setV('encodeRatioPct',Math.round((c.encode_ratio||0.2)*100));
+  // Outro
+  setTgl('tglOutro',c.enable_outro);syncEl('outroBody','tglOutro');
+  if(c.outro_text!=null)$('outroText').value=c.outro_text;
+  setV('outroDuration',c.outro_duration||5);
+  setV('outroFontSize',c.outro_font_size||36);
+  setV('outroBgColor',c.outro_bg_color||'#d2dcff');
+  setV('qrFile',c.qr_image||'QR.png');
+  // Upload
+  setTgl('tglAutoUpload',c.auto_upload);syncEl('upOpts','tglAutoUpload');
+  setTgl('tglAlbumMode',c.album_mode);
+  setV('upSendKey',c.upload_send_key||'enter');
+  setV('upDialogWait',c.upload_dialog_wait!=null?c.upload_dialog_wait:1.0);
+  setV('albumMax',c.album_max||10);
+  setV('upDelay',c.upload_delay!=null?c.upload_delay:0.5);
+  // Paths
+  setV('inputFolder',c.input_folder||'');
+  setV('outputFolder',c.output_folder||'output_videos');
+  setV('ffmpegPath',c.ffmpeg_path||'');
+  setV('outputSuffix',c.output_suffix||'_vnclip');
+  // temp_dir removed
+  // Update pipeline hint
+  updateCudaHint();
+}
+
+// ── Presets ──
+async function initPresets(){
+  const info=await pywebview.api.get_presets_info();
+  const sel=$('presetSel');sel.innerHTML='';
+  info.names.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);});
+  sel.value=info.last_preset||info.names[0]||'Fix ảnh';
+}
+async function applyPreset(){
+  const name=$('presetSel').value;
+  const cfg=await pywebview.api.load_preset(name);
+  if(cfg)applyConfig(cfg);
+  _activeOpt='';
+  await refreshOptions();
+  log('Nạp preset: '+name,'ok');
+}
+async function saveConfig(){
+  const name=$('presetSel').value;
+  const ok=await pywebview.api.save_config(name,JSON.stringify(getConfig()));
+  log(ok?'✓ Lưu preset: '+name:'✗ Lưu thất bại',ok?'ok':'err');
+}
+
+// ── Options (full-config sub-presets) ─────────────────────────────────────
+let _activeOpt='';
+function _currentPreset(){return $('presetSel').value||'';}
+
+async function refreshOptions(){
+  const sel=$('optSel');
+  const prev=sel.value;
+  sel.innerHTML='<option value="">— chọn —</option>';
+  try{
+    const res=await pywebview.api.get_logo_options(_currentPreset());
+    if(res&&res.names.length){
+      res.names.forEach(n=>{
+        const o=document.createElement('option');
+        o.value=n;o.textContent=n;
+        if(n===_activeOpt||n===prev)o.selected=true;
+        sel.appendChild(o);
+      });
+    }
+  }catch(e){}
+  const hasActive=_activeOpt&&[...$('optSel').options].some(o=>o.value===_activeOpt);
+  $('optDelBtn').style.display=hasActive?'':'none';
+}
+
+async function applyOptionFromSel(){
+  const name=$('optSel').value;
+  if(!name){_activeOpt='';$('optDelBtn').style.display='none';return;}
+  const cfg=await pywebview.api.load_logo_option(_currentPreset(),name);
+  if(!cfg||!Object.keys(cfg).length){log('Option rỗng: '+name,'warn');return;}
+  applyConfig(cfg);          // áp dụng toàn bộ settings
+  _activeOpt=name;
+  $('optDelBtn').style.display='';
+  log('✓ Option: '+name,'ok');
+}
+
+async function saveOption(){
+  const name=($('optName').value||'').trim();
+  if(!name){log('Nhập tên option!','warn');$('optName').focus();return;}
+  const ok=await pywebview.api.save_logo_option(_currentPreset(),name,JSON.stringify(getConfig()));
+  if(ok){
+    _activeOpt=name;$('optName').value='';
+    await refreshOptions();
+    $('optSel').value=name;
+    $('optDelBtn').style.display='';
+    log('✓ Lưu option "'+name+'"','ok');
+  }else{log('✗ Lưu option thất bại','err');}
+}
+
+async function deleteCurrentOption(){
+  const name=$('optSel').value||_activeOpt;
+  if(!name)return;
+  if(!confirm('Xóa option "'+name+'"?'))return;
+  await pywebview.api.delete_logo_option(_currentPreset(),name);
+  _activeOpt='';$('optDelBtn').style.display='none';
+  await refreshOptions();
+  log('Đã xóa option: '+name,'warn');
+}
+
+// ── Run ──
+async function startProcess(){
+  if(running)return;
+  if(!files.length){log('Quét thư mục trước khi chạy!','warn');return;}
+  running=true;$('runBtn').disabled=true;$('cancelBtn').disabled=false;
+  $('logDot').classList.remove('idle');
+  ['sOk','sErr'].forEach(id=>$(id).textContent='0');
+  $('mainBar').style.width='0%';$('progPct').textContent='0%';
+  $('progLabel').textContent='Đang xử lý…';
+  fflogOffset=0;
+  files.forEach((_,i)=>{
+    const el=$('fi-'+i);if(el)el.className='fi';
+    const st=$('fis-'+i);if(st){st.textContent='—';st.style.color='var(--tx3)';}
+    const tm=$('fit-'+i);if(tm)tm.textContent='';
+    const bar=$('fib-'+i);if(bar)bar.style.width='0%';
+    const md=$('fim-'+i);if(md)md.textContent='';
+  });
+  const r=await pywebview.api.start_process(JSON.stringify(getConfig()));
+  if(!r.ok){log(r.msg,'err');running=false;$('runBtn').disabled=false;$('cancelBtn').disabled=true;}
+}
+async function cancelProcess(){
+  await pywebview.api.cancel_process();
+  await pywebview.api.kill_ffmpeg();
+  log('Đang dừng + kill ffmpeg…','warn');
+}
+
+// ── Benchmark ──
+async function runBenchmark(){
+  const btn=$('benchBtn');btn.disabled=true;btn.textContent='⏳ Test…';
+  log('─── Test GPU ───','info');
+  try{
+    const r=await pywebview.api.run_benchmark(JSON.stringify(getConfig()));
+    r.results.forEach(item=>{
+      const speed=item.speed?' — '+item.speed+'x':'';
+      log((item.ok?'✅':'❌')+' '+item.name+speed+(item.msg?' | '+item.msg:''),item.ok?'ok':'err');
+    });
+    log('─── Xong ───','info');
+  }catch(e){log('Test lỗi: '+e,'err');}
+  finally{btn.disabled=false;btn.textContent='⚡ Test GPU';}
+}
+
+// ── Outro preview ──
+async function previewOutro(){
+  log('Render preview outro…','info');
+  try{
+    const r=await pywebview.api.create_outro_preview(JSON.stringify(getConfig()));
+    log(r.ok?'✅ Preview: '+r.path:'❌ '+r.msg,r.ok?'ok':'err');
+  }catch(e){log('Outro lỗi: '+e,'err');}
+}
+
+// ── Log ──
+function pad(n){return String(n).padStart(2,'0');}
+function ts(){const n=new Date();return`[${pad(n.getHours())}:${pad(n.getMinutes())}:${pad(n.getSeconds())}]`;}
+function log(msg,cls=''){
+  const b=$('logBody'),d=document.createElement('div');d.className='ll';
+  d.innerHTML=`<span class="t">${ts()}</span> `+(cls?`<span class="${cls}">${msg}</span>`:msg);
+  b.appendChild(d);b.scrollTop=b.scrollHeight;
+  if(cls==='err'){
+    lastErrLines.push(msg);if(lastErrLines.length>100)lastErrLines.shift();
+    $('copyErrBtn').style.display='';$('copyErrBtn2').style.display='';
+  }
+}
+function clearLog(){$('logBody').innerHTML='';lastErrLines=[];$('copyErrBtn').style.display='none';$('copyErrBtn2').style.display='none';}
+function copyLastErr(){pywebview.api.copy_to_clipboard(lastErrLines.join('\n')).then(r=>log(r.ok?'✓ Copy lỗi':'✗ Lỗi',r.ok?'ok':'err'));}
+
+// ── FFmpeg log modal ──
+let fflogOffset=0,fflogOpen=false;
+function _ffCls(l){l=l.toLowerCase();
+  if(/frame=|fps=|speed=|bitrate=|time=/.test(l))return 'info';
+  if(/error|invalid|failed|no such|cannot/.test(l))return 'err';
+  if(/warning|deprecated/.test(l))return 'warn';
+  if(/muxing overhead|encoded/.test(l))return 'ok';
+  return '';
+}
+async function _ffPoll(){
+  try{
+    const res=await pywebview.api.get_ffmpeg_log_since(fflogOffset);
+    if(!res||!res.lines||!res.lines.length)return;
+    fflogOffset=res.total;
+    if(fflogOpen){
+      const b=$('fflogBody'),frag=document.createDocumentFragment();
+      res.lines.forEach(line=>{
+        const d=document.createElement('div');d.className='ll';
+        const c=_ffCls(line);
+        d.innerHTML=c?'<span class="'+c+'">'+line+'</span>':line;
+        frag.appendChild(d);
+      });
+      b.appendChild(frag);
+      while(b.children.length>1500)b.removeChild(b.firstChild);
+      $('fflogInfo').textContent=fflogOffset+' dòng';
+      if(isOn('tglAutoScroll'))b.scrollTop=b.scrollHeight;
+    }
+  }catch(e){}
+}
+async function openFflog(){
+  fflogOpen=true;$('fflogOv').classList.add('show');
+  try{
+    const res=await pywebview.api.get_ffmpeg_log_since(0);
+    if(res&&res.lines&&res.lines.length){
+      const b=$('fflogBody');b.innerHTML='';fflogOffset=0;
+      const frag=document.createDocumentFragment();
+      res.lines.forEach(line=>{
+        const d=document.createElement('div');d.className='ll';
+        const c=_ffCls(line);
+        d.innerHTML=c?'<span class="'+c+'">'+line+'</span>':line;
+        frag.appendChild(d);
+      });
+      b.appendChild(frag);fflogOffset=res.total;
+      $('fflogInfo').textContent=fflogOffset+' dòng';
+      b.scrollTop=b.scrollHeight;
+    }
+  }catch(e){}
+}
+function closeFflog(){fflogOpen=false;$('fflogOv').classList.remove('show');}
+function copyFflog(){pywebview.api.copy_to_clipboard($('fflogBody').innerText).then(r=>log(r.ok?'✓ Copy log':'✗ Lỗi',r.ok?'ok':'err'));}
+function clearFflog(){$('fflogBody').innerHTML='';$('fflogInfo').textContent='0 dòng';}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeFflog();});
+
+// ── Init ──
+let _inited=false;
+async function _init(){
+  if(_inited)return;_inited=true;
+  let tries=0;
+  while((typeof pywebview==='undefined'||!pywebview.api)&&tries<30){
+    await new Promise(r=>setTimeout(r,200));tries++;
+  }
+  if(typeof pywebview==='undefined'||!pywebview.api){
+    log('Không kết nối được API!','err');return;
+  }
+  await initPresets();
+  try{
+    const cfg=await pywebview.api.load_preset($('presetSel').value||'Fix ảnh');
+    if(cfg)applyConfig(cfg);
+  }catch(e){}
+  await refreshOptions();
+  setInterval(_ffPoll,400);
+  updateCudaHint();
+  log('Watermark Studio v7 sẵn sàng 🚀','ok');
+}
+window.addEventListener('pywebviewready',_init);
+setTimeout(_init,1500);
+</script>
+</body>
+</html>
