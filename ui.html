@@ -698,7 +698,10 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         </div>
         <div class="swrow">
           <div class="lbl">RAM → Up → Xóa<small>Bắt buộc RAM disk — không fallback SSD. Cần ImDisk (Admin)</small></div>
-          <div class="sw yel" id="tglRamUpload" onclick="tgl(this)"></div>
+          <div class="sw yel" id="tglRamUpload" onclick="tgl(this);refreshRamStatus()"></div>
+        </div>
+        <div class="infobox ac" id="ramStatusBox" style="margin:6px 0;font-size:11px">
+          ⏳ Nhấn tab Upload hoặc Chạy để kiểm tra RAM…
         </div>
         <div class="swrow">
           <div class="lbl">Xóa file sau khi up</div>
@@ -841,6 +844,7 @@ let files=[],running=false,barTimers={},lastErrLines=[];
 function switchTab(i){
   document.querySelectorAll('.stab').forEach((t,j)=>t.classList.toggle('act',j===i));
   document.querySelectorAll('.tab-body').forEach((t,j)=>t.classList.toggle('act',j===i));
+  if(i===3)refreshRamStatus(true);
 }
 
 // ── Pipeline status ──
@@ -1215,10 +1219,46 @@ async function deleteCurrentOption(){
   log('Đã xóa option: '+name,'warn');
 }
 
+// ── RAM status ──
+async function refreshRamStatus(){
+  const box=$('ramStatusBox');
+  if(!box||!pywebview.api||!pywebview.api.check_ram_status)return;
+  box.className='infobox ac';
+  box.innerHTML='⏳ Đang kiểm tra RAM disk…';
+  try{
+    const st=await pywebview.api.check_ram_status(JSON.stringify(getConfig()));
+    const ramOn=isOn('tglRamUpload');
+    if(st.available){
+      box.className='infobox ac';
+      box.innerHTML='✅ <b>RAM dùng được</b> — '+esc(st.message||'')+
+        (st.hint?'<br><small>'+esc(st.hint)+'</small>':'');
+      log('💾 RAM OK: '+(st.message||''),'ok');
+    }else{
+      box.className='infobox yel';
+      box.innerHTML='⚠️ <b>RAM chưa sẵn sàng</b> — '+esc(st.message||'')+
+        (st.hint?'<br><small>'+esc(st.hint)+'</small>':'')+
+        (ramOn?'<br><small><b>Đang bật RAM mode → batch sẽ DỪNG nếu chạy!</b></small>':'');
+      log('💾 RAM: '+(st.message||'Không có'),'warn');
+    }
+  }catch(e){
+    box.className='infobox yel';
+    box.textContent='Không kiểm tra được RAM';
+  }
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
 // ── Run ──
 async function startProcess(){
   if(running)return;
   if(!files.length){log('Quét thư mục trước khi chạy!','warn');return;}
+  if(pywebview.api&&pywebview.api.check_ram_status){
+    const st=await pywebview.api.check_ram_status(JSON.stringify(getConfig()));
+    await refreshRamStatus();
+    if(isOn('tglRamUpload')&&!st.available){
+      log('✗ RAM mode đang BẬT nhưng không có RAM disk — cài ImDisk + Admin hoặc tắt RAM mode','err');
+      return;
+    }
+  }
   running=true;$('runBtn').disabled=true;$('cancelBtn').disabled=false;
   $('logDot').classList.remove('idle');
   ['sOk','sErr'].forEach(id=>$(id).textContent='0');
@@ -1350,6 +1390,7 @@ async function _init(){
     if(cfg)applyConfig(cfg);
   }catch(e){}
   await refreshOptions();
+  await refreshRamStatus();
   setInterval(_ffPoll,400);
   updateCudaHint();
   log('Watermark Studio v7 sẵn sàng 🚀','ok');

@@ -165,6 +165,75 @@ def scan_ram_volumes():
     return [(a, b, c) for a, b, c, _ in found]
 
 
+def get_ram_status(cfg=None, probe_create=False):
+    """
+    Kiem tra RAM disk co dung duoc khong.
+    Tra dict de log/UI hien thi.
+    """
+    cfg = cfg or {}
+    imdisk = _find_imdisk() if sys.platform == "win32" else None
+    volumes = scan_ram_volumes()
+
+    if volumes:
+        path = os.path.join(volumes[0][0], "GPUWM")
+        return {
+            "ok": True,
+            "available": True,
+            "path": path,
+            "volumes": [v[0] for v in volumes],
+            "imdisk": bool(imdisk),
+            "message": f"Co RAM disk: {volumes[0][0]} ({volumes[0][2]})",
+            "hint": "Bat 'RAM → Up → Xóa' de encode output len RAM",
+        }
+
+    if sys.platform != "win32":
+        shm = _linux_ram_paths()
+        if shm:
+            return {
+                "ok": True, "available": True, "path": os.path.join(shm, "gpuwm"),
+                "volumes": [shm], "imdisk": False,
+                "message": f"Co RAM tmpfs: {shm}",
+                "hint": "Bat RAM mode de dung",
+            }
+        return {
+            "ok": False, "available": False, "path": None, "volumes": [],
+            "imdisk": False,
+            "message": "Khong co /dev/shm",
+            "hint": "Linux can tmpfs",
+        }
+
+    if probe_create and imdisk:
+        path, msg = try_create_imdisk(cfg.get("ram_disk_mb"))
+        if path:
+            return {
+                "ok": True, "available": True, "path": path, "volumes": [],
+                "imdisk": True,
+                "message": msg,
+                "hint": "RAM disk vua duoc tao tu dong",
+            }
+        return {
+            "ok": False, "available": False, "path": None, "volumes": [],
+            "imdisk": True,
+            "message": msg,
+            "hint": "Chay app Run as Administrator de tu tao RAM disk",
+        }
+
+    if imdisk:
+        return {
+            "ok": False, "available": False, "path": None, "volumes": [],
+            "imdisk": True,
+            "message": "Co ImDisk nhung chua co o RAM — can Run as Administrator",
+            "hint": "Chuot phai app → Run as Administrator, bat RAM mode, chay lai",
+        }
+
+    return {
+        "ok": False, "available": False, "path": None, "volumes": [],
+        "imdisk": False,
+        "message": "Khong co RAM disk / ImDisk",
+        "hint": "Cai ImDisk Toolkit (free) + chay Admin, hoac TAT 'RAM → Up → Xóa'",
+    }
+
+
 def resolve_temp_base(cfg=None, ram_mode=False):
     """
     ram_mode=True: CHI RAM — tra (path, mo_ta) hoac (None, loi). Khong fallback SSD.

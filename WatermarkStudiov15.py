@@ -2254,6 +2254,21 @@ class Api:
         ok, err = create_outro_video(cfg, 1280, 720, 30.0, out)
         return {"ok": ok, "path": out if ok else "", "msg": err}
 
+    def check_ram_status(self, config_json=None):
+        """API: kiem tra RAM disk cho UI / truoc khi chay."""
+        cfg = {**DEFAULT_CONFIG}
+        if config_json:
+            try:
+                cfg.update(json.loads(config_json))
+            except Exception:
+                pass
+        try:
+            from ram_temp import get_ram_status
+            st = get_ram_status(cfg, probe_create=False)
+        except ImportError:
+            st = {"ok": False, "available": False, "message": "Thieu ram_temp.py", "hint": ""}
+        return st
+
     def start_process(self, config_json):
         global _running
         if _running:
@@ -2412,18 +2427,33 @@ class Api:
                 "msg": f"  ⬆ Prefix [{prefix}] xong {expect} file — up {len(ready)} file ngay..."})
             _do_upload_chunks(split_chunks(ready, album_max), f"[{prefix}]")
 
-        # Thu muc temp: tu dong chon RAM disk / tmpfs — khong can user nhap R:\
+        # --- Kiem tra RAM: LUON bao cao moi lan chay ---
+        try:
+            from ram_temp import get_ram_status
+            _rs = get_ram_status(cfg, probe_create=bool(cfg.get("ram_upload")))
+            if _rs.get("available"):
+                self._emit("log", {"cls": "ok",
+                    "msg": f"💾 RAM: {_rs.get('message', 'OK')}"})
+            else:
+                self._emit("log", {"cls": "warn",
+                    "msg": f"💾 RAM: {_rs.get('message', 'Khong co')}"})
+                if _rs.get("hint"):
+                    self._emit("log", {"cls": "info", "msg": f"   → {_rs['hint']}"})
+        except ImportError:
+            self._emit("log", {"cls": "warn", "msg": "💾 RAM: khong kiem tra duoc (thieu ram_temp.py)"})
+
+        # Thu muc temp: bat buoc RAM khi ram_upload
         _tmp_base = None
         _ram_temp_label = ""
         if cfg.get("ram_upload"):
             _tmp_base, _ram_temp_label = resolve_temp_base(cfg, ram_mode=True)
             if not _tmp_base:
-                self._emit("log", {"cls": "err", "msg": f"✗ RAM mode: {_ram_temp_label}"})
+                self._emit("log", {"cls": "err", "msg": f"✗ RAM mode BAT BUOC: {_ram_temp_label}"})
                 self._emit("log", {"cls": "err", "msg":
-                    "  → Cai ImDisk Toolkit (free), chay app Admin, hoac tat RAM mode"})
+                    "  → Tat 'RAM → Up → Xóa' HOAC cai ImDisk + Run as Administrator"})
                 self._emit("done", {"ok": 0, "err": 1, "total": 0})
                 return
-            self._emit("log", {"cls": "ok", "msg": f"💾 RAM OK: {_ram_temp_label}"})
+            self._emit("log", {"cls": "ok", "msg": f"💾 RAM mode BAT: {_ram_temp_label}"})
         else:
             td = (cfg.get("temp_dir") or "").strip()
             if td and os.path.isdir(td):
