@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import time
+import gc
 
 import numpy as np
 
@@ -26,7 +27,14 @@ except ImportError:
     cp = None
     CUPY_OK = False
 
-_BATCH = 8
+_BATCH_MAX = 4
+
+
+def _batch_size(height, width, max_mb=32):
+    """Gioi han batch theo RAM — tranh OOM video dai 1080p+."""
+    frame_bytes = max(height * width * 3, 1)
+    cap = max(1, (max_mb * 1024 * 1024) // frame_bytes)
+    return max(1, min(_BATCH_MAX, cap))
 
 
 def is_available():
@@ -177,6 +185,8 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
 
     t0 = time.time()
     meta = {"engine": "gpu_direct", "frames": 0}
+    decoder = None
+    encoder = None
 
     try:
         otype = nvc.OutputColorType.RGB
@@ -188,7 +198,7 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
         decoder = nvc.SimpleDecoder(
             inp,
             gpu_id=int(cfg.get("gpu_id", 0)),
-            use_device_memory=CUPY_OK,
+            use_device_memory=False,
             output_color_type=otype,
         )
     except Exception as e:
@@ -244,6 +254,7 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
         return False, f"CreateEncoder loi: {e}", meta
 
     blend = _blend_batch_gpu if CUPY_OK else _blend_batch_cpu
+    batch_cap = _batch_size(height, width)
     tmp_h264 = os.path.join(
         tmp_dir or tempfile.gettempdir(),
         f"gpu_direct_{abs(hash(outp))}.h264",
@@ -254,7 +265,7 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
     try:
         with open(tmp_h264, "wb") as bitstream:
             while idx < max_frames:
-                batch_n = min(_BATCH, max_frames - idx)
+                batch_n = min(batch_cap, max_frames - idx)
                 try:
                     if idx == 0 and skip_frames == 0:
                         raw_frames = decoder.get_batch_frames(batch_n)
@@ -281,18 +292,24 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
                     if progress_cb and frames_done % 120 == 0:
                         progress_cb(frames_done, max_frames - skip_frames)
 
+                del raw_frames, rgb_list, blended
                 idx += batch_n
+                if frames_done % 240 == 0:
+                    gc.collect()
 
             tail = encoder.EndEncode()
             if tail:
                 bitstream.write(bytearray(tail))
+    except MemoryError:
+        return False, "Het RAM — thu giam gpu_workers=1 hoac ImDisk xuong 4GB", meta
     except Exception as e:
         return False, f"Encode pipeline loi: {e}", meta
     finally:
         try:
-            del decoder
+            del decoder, encoder
         except Exception:
             pass
+        gc.collect()
 
     meta["frames"] = frames_done
     meta["elapsed"] = round(time.time() - t0, 2)

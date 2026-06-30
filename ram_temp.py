@@ -1,4 +1,5 @@
 """RAM-only temp — bat buoc RAM disk/tmpfs, KHONG fallback SSD khi ram_mode."""
+import gc
 import os
 import shutil
 import string
@@ -332,6 +333,60 @@ def require_ram_temp(cfg=None):
 def clear_cache():
     with _lock:
         _cache.clear()
+
+
+def cleanup_work_dirs(cfg=None, include_ssd=True):
+    """Xoa file temp con sot (GPUWM tren RAM disk + %TEMP%). Tra so muc da xoa."""
+    cfg = cfg or {}
+    dirs = []
+    for vol, _, _ in scan_ram_volumes():
+        dirs.append(os.path.join(vol, "GPUWM"))
+    override = (cfg.get("temp_dir") or "").strip()
+    if override:
+        dirs.append(override)
+    if include_ssd:
+        td = tempfile.gettempdir()
+        dirs.extend([
+            os.path.join(td, "GPUWM_work"),
+            os.path.join(td, "gpu_wm_text"),
+        ])
+    seen = set()
+    removed = 0
+    for d in dirs:
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            path = os.path.join(d, name)
+            try:
+                if os.path.isfile(path) or os.path.islink(path):
+                    os.remove(path)
+                    removed += 1
+                elif os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                pass
+    gc.collect()
+    return removed
+
+
+def kill_orphan_ffmpeg():
+    """Kill ffmpeg con sot sau crash (Windows)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        r = subprocess.run(
+            ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+            capture_output=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
 
 
 def detach_created_imdisks():

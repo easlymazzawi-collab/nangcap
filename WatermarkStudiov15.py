@@ -5,7 +5,7 @@ Batch watermark — GPU Direct (PyNvVideoCodec) hoac FFmpeg Turbo fallback.
 
 UI tach rieng o file ui.html cung thu muc.
 """
-import os, sys, json, time, threading, subprocess, hashlib, tempfile, shutil, asyncio, webview
+import os, sys, json, time, threading, subprocess, hashlib, tempfile, shutil, asyncio, webview, atexit, gc
 
 try:
     import gpu_direct as _gpu_direct
@@ -15,7 +15,10 @@ except ImportError:
     GPU_DIRECT_OK = False
 
 try:
-    from ram_temp import resolve_temp_base, clear_cache as _clear_ram_temp_cache, RAM_REQUIRED_MSG
+    from ram_temp import (
+        resolve_temp_base, clear_cache as _clear_ram_temp_cache, RAM_REQUIRED_MSG,
+        cleanup_work_dirs, kill_orphan_ffmpeg, detach_created_imdisks,
+    )
 except ImportError:
     RAM_REQUIRED_MSG = "Thieu module ram_temp.py"
     def resolve_temp_base(cfg=None, ram_mode=False):
@@ -26,6 +29,15 @@ except ImportError:
         os.makedirs(p, exist_ok=True)
         return p, p
     def _clear_ram_temp_cache():
+        pass
+
+    def cleanup_work_dirs(cfg=None, include_ssd=True):
+        return 0
+
+    def kill_orphan_ffmpeg():
+        return False
+
+    def detach_created_imdisks():
         pass
 
 try:
@@ -200,6 +212,50 @@ def split_chunks(files, max_size=10):
     return [files[i:i+sz] for i in range(0, n, sz)]
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+
+def _kill_ffmpeg_processes():
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
+def _startup_cleanup():
+    """Don rac tu lan chay truoc (crash/OOM)."""
+    kill_orphan_ffmpeg()
+    try:
+        n = cleanup_work_dirs(include_ssd=True)
+        if n:
+            print(f"[cleanup] Da xoa {n} temp con sot")
+    except Exception:
+        pass
+
+
+def _shutdown_cleanup():
+    """Khi tat app — kill ffmpeg + temp (ImDisk R: user tu tao giu nguyen)."""
+    _kill_ffmpeg_processes()
+    try:
+        cleanup_work_dirs(include_ssd=True)
+    except Exception:
+        pass
+    try:
+        from wm_overlay import clear_overlay_cache
+        clear_overlay_cache()
+    except Exception:
+        pass
+    try:
+        _clear_ram_temp_cache()
+    except Exception:
+        pass
+    gc.collect()
+
 APP_DIR     = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 CONFIG_PATH = os.path.join(APP_DIR, "wm_config.json")
 UI_PATH     = os.path.join(APP_DIR, "ui.html")
@@ -271,7 +327,7 @@ DEFAULT_CONFIG = {
     "nvenc_cq":       23,
     "nvenc_preset":   "p1",
     "max_workers":    2,
-    "gpu_workers":    2,
+    "gpu_workers":    1,
     "turbo_nvdec":    True,
     "encode_engine":  "gpu_direct",
     "ram_upload":     False,
@@ -1983,13 +2039,24 @@ class Api:
     def kill_ffmpeg(self):
         """Kill toan bo process ffmpeg.exe dang chay (Windows)."""
         try:
-            import subprocess as _sp
-            _sp.Popen(["taskkill", "/F", "/IM", "ffmpeg.exe"],
-                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                      creationflags=CREATE_NO_WINDOW)
+            _kill_ffmpeg_processes()
             return {"ok": True, "msg": "💀 Đã gửi lệnh kill ffmpeg.exe"}
         except Exception as e:
             return {"ok": False, "msg": f"Kill lỗi: {e}"}
+
+    def cleanup_resources(self):
+        """Don temp + ffmpeg con sot (sau crash hoac thu cong)."""
+        _kill_ffmpeg_processes()
+        n = cleanup_work_dirs(include_ssd=True)
+        _clear_ram_temp_cache()
+        try:
+            from wm_overlay import clear_overlay_cache
+            clear_overlay_cache()
+        except Exception:
+            pass
+        gc.collect()
+        return {"ok": True, "removed": n,
+                "msg": f"Đã dọn {n} temp + kill ffmpeg (ImDisk R: vẫn giữ 8GB — đó là bình thường)"}
 
     def pick_logo(self):
         r = _window.create_file_dialog(webview.OPEN_DIALOG, file_types=('PNG (*.png)',))
@@ -2293,13 +2360,7 @@ class Api:
 
     def cancel_process(self):
         _cancel_flag.set()
-        # Kill tat ca ffmpeg ngay lap tuc (khong cho file hien tai chay xong)
-        try:
-            subprocess.Popen(["taskkill", "/F", "/IM", "ffmpeg.exe"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=CREATE_NO_WINDOW)
-        except Exception:
-            pass
+        _kill_ffmpeg_processes()
         return {"ok": True}
 
     def _emit(self, event, data):
@@ -2312,8 +2373,15 @@ class Api:
         global _running
         try:
             self._run(cfg)
+        except Exception as e:
+            self._emit("log", {"cls": "err", "msg": f"Loi batch: {e}"})
         finally:
             _running = False
+            try:
+                cleanup_work_dirs(cfg, include_ssd=True)
+            except Exception:
+                pass
+            gc.collect()
 
     def _run(self, cfg):
         ff        = cfg["ffmpeg_path"]
@@ -2331,6 +2399,12 @@ class Api:
         gpu_workers = int(cfg.get("gpu_workers", cfg.get("max_workers", 2)) or 0)
         cpu_workers = int(cfg.get("cpu_workers", 0) or 0)
         if gpu_workers <= 0 and cpu_workers <= 0:
+            gpu_workers = 1
+
+        eng = (cfg.get("encode_engine") or "auto").lower()
+        if eng in ("gpu_direct", "auto") and GPU_DIRECT_OK and gpu_workers > 1:
+            self._emit("log", {"cls": "warn",
+                "msg": "⚠ GPU Direct: chi 1 file/luc (tranh het RAM/OOM) — gpu_workers 2→1"})
             gpu_workers = 1
 
         # v7: nvenc_sessions = gpu_workers (UI da gop 2 thanh 1)
@@ -2911,6 +2985,8 @@ class Api:
 
 def main():
     global _window
+    _startup_cleanup()
+    atexit.register(_shutdown_cleanup)
     _window = webview.create_window(
         title="GPU Watermark Studio v12",
         html=_load_ui(),
@@ -2920,6 +2996,7 @@ def main():
         background_color="#090b10",
     )
     webview.start(debug=False)
+    _shutdown_cleanup()
 
 if __name__ == "__main__":
     main()

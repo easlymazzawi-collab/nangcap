@@ -709,6 +709,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
             <small>Không bật RAM mode vẫn watermark bình thường — file lưu vào Output.</small>
             <ol id="ramSetupSteps" style="margin:6px 0 8px 18px;padding:0"></ol>
             <button class="mini" type="button" onclick="openImdiskDownload()">⬇ Tải ImDisk Toolkit</button>
+            <button class="mini" type="button" onclick="cleanupResources()" style="margin-left:6px">🧹 Dọn temp + ffmpeg</button>
           </div>
         </div>
         <div class="swrow">
@@ -1238,6 +1239,12 @@ async function openImdiskDownload(){
   }else{
     window.open(url,'_blank');
   }
+}
+async function cleanupResources(){
+  if(!pywebview.api||!pywebview.api.cleanup_resources)return;
+  const r=await pywebview.api.cleanup_resources();
+  log(r&&r.msg?r.msg:'Đã dọn xong','info');
+  await refreshRamStatus(true);
 }
 function onRamToggle(){
   refreshRamStatus(!isOn('tglRamUpload'));
