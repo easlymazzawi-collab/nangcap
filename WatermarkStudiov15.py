@@ -1,11 +1,18 @@
 """
-GPU Watermark Studio v12
-Batch watermark video/image (overlay_cuda LUON BAT) + logo + 4 goc chu + outro
-+ Auto upload Telegram Desktop.
+GPU Watermark Studio v15
+Batch watermark — GPU Direct (PyNvVideoCodec) hoac FFmpeg Turbo fallback.
++ Auto upload Telegram Desktop (RAM temp, xoa sau up).
 
 UI tach rieng o file ui.html cung thu muc.
 """
 import os, sys, json, time, threading, subprocess, hashlib, tempfile, shutil, asyncio, webview
+
+try:
+    import gpu_direct as _gpu_direct
+    GPU_DIRECT_OK = _gpu_direct.is_available()
+except ImportError:
+    _gpu_direct = None
+    GPU_DIRECT_OK = False
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -252,6 +259,9 @@ DEFAULT_CONFIG = {
     "max_workers":    2,
     "gpu_workers":    2,
     "turbo_nvdec":    True,
+    "encode_engine":  "gpu_direct",
+    "ram_upload":     False,
+    "delete_after_upload": True,
     "cpu_workers":    0,
     "x264_preset":    "medium",
     "min_output_kb":  50,
@@ -1076,11 +1086,38 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
             except: pass
         return False, False, reason
 
-    # --- GPU worker: fast mode (overlay logo PNG goc truc tiep + NVENC) ---
-    # v7.3: bo render_wm_template, build_fast_cmd tu lay logo PNG tu cfg.
-    # HS preset co dynamic WM (DVD/bounce) -> fallback drawtext CPU tu dong.
-    want_fast = (not _has_dynamic_wm(cfg) and cfg.get("_fast_ok", True))
+    # --- GPU Direct: NVDEC -> CUDA overlay -> NVENC (khong FFmpeg filter) ---
+    engine = (cfg.get("encode_engine") or "auto").lower()
     last_err = ""
+    if use_gpu and not _has_dynamic_wm(cfg) and engine in ("gpu_direct", "auto") and _gpu_direct:
+        if GPU_DIRECT_OK or engine == "gpu_direct":
+            try:
+                cfg_gd = dict(cfg)
+                cfg_gd["_fps"] = _get_fps(ffprobe_p, inp)
+                rot = _get_rotation(ffprobe_p, inp)
+                if rot == 0 and GPU_DIRECT_OK:
+                    ok_gd, err_gd, _meta = _gpu_direct.process(
+                        cfg_gd, inp, outp,
+                        trim=trim, dur_limit=dur_limit, norm_audio=norm_a,
+                        tmp_dir=(cfg.get("temp_dir") or "").strip() or None,
+                    )
+                    if ok_gd and _is_valid(outp, min_kb):
+                        return True, True, "gpu_direct"
+                    last_err = err_gd or "gpu_direct loi"
+                    if engine == "gpu_direct":
+                        if os.path.exists(outp):
+                            try: os.remove(outp)
+                            except: pass
+                        return False, False, last_err
+                elif engine == "gpu_direct":
+                    return False, False, "GPU Direct can PyNvVideoCodec hoac video bi xoay"
+            except Exception as e:
+                last_err = f"gpu_direct: {e}"
+                if engine == "gpu_direct":
+                    return False, False, last_err
+
+    # --- GPU worker: FFmpeg Turbo (overlay_cuda fallback) ---
+    want_fast = (not _has_dynamic_wm(cfg) and cfg.get("_fast_ok", True))
     if want_fast:
         w, h, pix = _probe_wh(ffprobe_p, inp)
         if w and h and pix not in TEN_BIT:
@@ -1808,6 +1845,10 @@ class Api:
         has_logo = os.path.isfile(cfg.get("logo_image",""))
         chk("Logo PNG", has_logo, cfg.get("logo_image","") if has_logo else "Không tìm thấy — fast mode sẽ không có logo")
 
+        if _gpu_direct:
+            chk("GPU Direct (PyNvVideoCodec)", GPU_DIRECT_OK,
+                _gpu_direct.capability_info() if GPU_DIRECT_OK else "pip install PyNvVideoCodec")
+
         # 4. NVENC hoat dong (encode 1s video test)
         import tempfile as _tmp
         test_out = os.path.join(_tmp.gettempdir(), "_wm_bench_nvenc.mp4")
@@ -2446,12 +2487,19 @@ class Api:
 
         dynamic = _has_dynamic_wm(cfg)
         cfg["_fast_ok"] = True
+        eng = (cfg.get("encode_engine") or "auto").lower()
         if not dynamic:
-            self._emit("log", {"cls":"info","msg":"Dang kiem tra NVENC…"})
+            self._emit("log", {"cls":"info","msg":"Dang kiem tra engine…"})
+            if eng in ("gpu_direct", "auto") and GPU_DIRECT_OK and _gpu_direct:
+                self._emit("log", {"cls":"ok","msg":
+                    f"⚡ GPU Direct BAT — {_gpu_direct.capability_info()}"})
+            elif eng == "gpu_direct":
+                self._emit("log", {"cls":"warn","msg":
+                    "GPU Direct thieu PyNvVideoCodec → se fallback FFmpeg Turbo"})
             if fast_cuda_supported(cfg):
                 turbo = " + NVDEC" if cfg.get("turbo_nvdec", True) else ""
                 self._emit("log", {"cls":"ok","msg":
-                    f"✓ Turbo Render: overlay_cuda + PNG chữ giữa/góc{turbo} 🚀"})
+                    f"✓ FFmpeg Turbo san sang (fallback){turbo}"})
             else:
                 cfg["_fast_ok"] = False
                 self._emit("log", {"cls":"warn","msg":
@@ -2468,10 +2516,21 @@ class Api:
                 "logo " + (f"AUTO {int(ratio*100)}% (>{int(thr)}s)" if thr > 0 else "FULL")]
         if parts > 1:               info.append(f"VA Pro {parts} phan")
         if not dynamic:
-            info.append("🚀 Turbo overlay_cuda")
+            if eng == "gpu_direct" and GPU_DIRECT_OK:
+                info.append("⚡ GPU Direct")
+            else:
+                info.append("🚀 Turbo overlay_cuda")
         else:
             info.append("✨ WM dong (HS preset)")
         if cfg.get("enable_outro"): info.append("🎬 outro")
+        if cfg.get("ram_upload"):   info.append("💾 RAM→Up→Xoa")
+        if cfg.get("ram_upload"):
+            td = (cfg.get("temp_dir") or "").strip() or tempfile.gettempdir()
+            self._emit("log", {"cls":"info",
+                "msg":f"💾 RAM mode: encode → {td} → up Telegram → xoa (khong ghi output SSD)"})
+            if not auto_up:
+                self._emit("log", {"cls":"warn",
+                    "msg":"RAM mode nen bat Auto upload — neu khong file van nam tren temp"})
         self._emit("log", {"cls": "info", "msg": " | ".join(info)})
 
         # --- Trang thai dung chung giua cac luong ---
@@ -2510,8 +2569,12 @@ class Api:
             else:
                 duration   = _get_duration(ffprobe_p, inp)
                 tmp_dir    = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
-                # Render thang ra out_dir, file temp chi dung cho concat_outro.
-                dest_dir   = out_dir
+                # RAM upload: ghi temp (RAM disk), khong ghi output_folder tren SSD
+                if cfg.get("ram_upload") and _gpu_direct:
+                    dest_dir = (cfg.get("temp_dir") or "").strip() or tempfile.gettempdir()
+                    os.makedirs(dest_dir, exist_ok=True)
+                else:
+                    dest_dir = out_dir
                 outp_final = os.path.join(dest_dir, name + suffix + ".mp4")
                 fail_reason = ""
                 # Canh bao som neu khong probe duoc duration (file loi/path xau)
@@ -2529,9 +2592,13 @@ class Api:
                                   if cfg.get("enable_outro") else p_outp)
                         s, fast, reason = encode_segment(cfg, ffprobe_p, inp, wm_tmp, fc_p,
                                                          p_start, p_limit, use_gpu=use_gpu)
-                        if not s and reason:
+                        enc_engine = reason if reason == "gpu_direct" else ""
+                        if not s and reason and reason != "gpu_direct":
                             fail_reason = reason
-                        tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
+                        if enc_engine == "gpu_direct":
+                            tag = " [⚡direct]"
+                        else:
+                            tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
                         if s and cfg.get("enable_outro"):
                             s2, emsg = concat_outro(ff, ffprobe_p, wm_tmp, p_outp, cfg, tmp_dir)
                             if not s2:
@@ -2629,6 +2696,14 @@ class Api:
                                 if ok_up:
                                     self._emit("log", {"cls":"ok",
                                         "msg":f"  ⬆ Da day vao Telegram: {os.path.basename(f1)}"})
+                                    if cfg.get("ram_upload") and cfg.get("delete_after_upload"):
+                                        try:
+                                            os.remove(f1)
+                                            self._emit("log", {"cls":"info",
+                                                "msg":f"  🗑 Da xoa temp RAM (khong luu SSD): {os.path.basename(f1)}"})
+                                        except OSError as de:
+                                            self._emit("log", {"cls":"warn",
+                                                "msg":f"  Khong xoa duoc temp: {de}"})
                                 else:
                                     self._emit("log", {"cls":"err",
                                         "msg":f"  ⬆ Up loi: {msg_up[:80]} — file van o Output"})

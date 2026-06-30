@@ -1,0 +1,10 @@
+# GPU Direct Pipeline dependencies (Windows + NVIDIA RTX)
+# pip install -r requirements-gpu.txt
+
+PyNvVideoCodec>=2.0.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# Optional: GPU overlay batch (nhanh hon CPU numpy)
+# Chon dung ban CUDA — vi du RTX 3060 + CUDA 12:
+# cupy-cuda12x
