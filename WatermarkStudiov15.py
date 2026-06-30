@@ -2269,6 +2269,18 @@ class Api:
             st = {"ok": False, "available": False, "message": "Thieu ram_temp.py", "hint": ""}
         return st
 
+    def open_external_url(self, url):
+        """Mo link trong trinh duyet (vd. tai ImDisk)."""
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return {"ok": False, "msg": "URL khong hop le"}
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+
     def start_process(self, config_json):
         global _running
         if _running:
@@ -2427,20 +2439,25 @@ class Api:
                 "msg": f"  ⬆ Prefix [{prefix}] xong {expect} file — up {len(ready)} file ngay..."})
             _do_upload_chunks(split_chunks(ready, album_max), f"[{prefix}]")
 
-        # --- Kiem tra RAM: LUON bao cao moi lan chay ---
+        # --- Kiem tra RAM: chi log khi bat RAM mode hoac da co RAM disk ---
         try:
-            from ram_temp import get_ram_status
-            _rs = get_ram_status(cfg, probe_create=bool(cfg.get("ram_upload")))
+            from ram_temp import get_ram_status, IMDISK_DOWNLOAD_URL
+            _ram_on = bool(cfg.get("ram_upload"))
+            _rs = get_ram_status(cfg, probe_create=_ram_on)
             if _rs.get("available"):
                 self._emit("log", {"cls": "ok",
                     "msg": f"💾 RAM: {_rs.get('message', 'OK')}"})
-            else:
+            elif _ram_on:
                 self._emit("log", {"cls": "warn",
                     "msg": f"💾 RAM: {_rs.get('message', 'Khong co')}"})
                 if _rs.get("hint"):
                     self._emit("log", {"cls": "info", "msg": f"   → {_rs['hint']}"})
+                if not _rs.get("imdisk"):
+                    self._emit("log", {"cls": "info",
+                        "msg": f"   → Tai ImDisk: {IMDISK_DOWNLOAD_URL}"})
         except ImportError:
-            self._emit("log", {"cls": "warn", "msg": "💾 RAM: khong kiem tra duoc (thieu ram_temp.py)"})
+            if cfg.get("ram_upload"):
+                self._emit("log", {"cls": "warn", "msg": "💾 RAM: khong kiem tra duoc (thieu ram_temp.py)"})
 
         # Thu muc temp: bat buoc RAM khi ram_upload
         _tmp_base = None

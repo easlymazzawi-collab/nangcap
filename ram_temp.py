@@ -14,6 +14,8 @@ _created_mounts = []  # o ImDisk tool tu tao (de detach khi can)
 _DRIVE_RAMDISK = 6
 _DRIVE_REMOVABLE = 2
 
+IMDISK_DOWNLOAD_URL = "https://sourceforge.net/projects/imdisk-toolkit/files/latest/download"
+
 RAM_REQUIRED_MSG = (
     "RAM mode BAT BUOC co RAM disk. Windows khong co san — cai ImDisk Toolkit "
     "(free) roi chay lai, hoac tat RAM mode. Tool KHONG ghi temp len SSD."
@@ -182,6 +184,7 @@ def get_ram_status(cfg=None, probe_create=False):
             "path": path,
             "volumes": [v[0] for v in volumes],
             "imdisk": bool(imdisk),
+            "imdisk_url": IMDISK_DOWNLOAD_URL,
             "message": f"Co RAM disk: {volumes[0][0]} ({volumes[0][2]})",
             "hint": "Bat 'RAM → Up → Xóa' de encode output len RAM",
         }
@@ -191,13 +194,13 @@ def get_ram_status(cfg=None, probe_create=False):
         if shm:
             return {
                 "ok": True, "available": True, "path": os.path.join(shm, "gpuwm"),
-                "volumes": [shm], "imdisk": False,
+                "volumes": [shm], "imdisk": False, "imdisk_url": "",
                 "message": f"Co RAM tmpfs: {shm}",
                 "hint": "Bat RAM mode de dung",
             }
         return {
             "ok": False, "available": False, "path": None, "volumes": [],
-            "imdisk": False,
+            "imdisk": False, "imdisk_url": "",
             "message": "Khong co /dev/shm",
             "hint": "Linux can tmpfs",
         }
@@ -207,13 +210,13 @@ def get_ram_status(cfg=None, probe_create=False):
         if path:
             return {
                 "ok": True, "available": True, "path": path, "volumes": [],
-                "imdisk": True,
+                "imdisk": True, "imdisk_url": IMDISK_DOWNLOAD_URL,
                 "message": msg,
                 "hint": "RAM disk vua duoc tao tu dong",
             }
         return {
             "ok": False, "available": False, "path": None, "volumes": [],
-            "imdisk": True,
+            "imdisk": True, "imdisk_url": IMDISK_DOWNLOAD_URL,
             "message": msg,
             "hint": "Chay app Run as Administrator de tu tao RAM disk",
         }
@@ -221,16 +224,22 @@ def get_ram_status(cfg=None, probe_create=False):
     if imdisk:
         return {
             "ok": False, "available": False, "path": None, "volumes": [],
-            "imdisk": True,
+            "imdisk": True, "imdisk_url": IMDISK_DOWNLOAD_URL,
             "message": "Co ImDisk nhung chua co o RAM — can Run as Administrator",
             "hint": "Chuot phai app → Run as Administrator, bat RAM mode, chay lai",
         }
 
     return {
         "ok": False, "available": False, "path": None, "volumes": [],
-        "imdisk": False,
+        "imdisk": False, "imdisk_url": IMDISK_DOWNLOAD_URL,
         "message": "Khong co RAM disk / ImDisk",
         "hint": "Cai ImDisk Toolkit (free) + chay Admin, hoac TAT 'RAM → Up → Xóa'",
+        "setup_steps": [
+            "Tai ImDisk Toolkit (free, ~2 phut cai)",
+            "Cai dat xong — khoi dong lai app",
+            "Chuot phai app → Run as Administrator",
+            "Bat 'RAM → Up → Xóa' tren tab Upload",
+        ],
     }
 
 

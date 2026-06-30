@@ -698,10 +698,18 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         </div>
         <div class="swrow">
           <div class="lbl">RAM → Up → Xóa<small>Bắt buộc RAM disk — không fallback SSD. Cần ImDisk (Admin)</small></div>
-          <div class="sw yel" id="tglRamUpload" onclick="tgl(this);refreshRamStatus()"></div>
+          <div class="sw yel" id="tglRamUpload" onclick="tgl(this);onRamToggle()"></div>
         </div>
         <div class="infobox ac" id="ramStatusBox" style="margin:6px 0;font-size:11px">
           ⏳ Nhấn tab Upload hoặc Chạy để kiểm tra RAM…
+        </div>
+        <div id="ramSetupBox" style="display:none;margin:6px 0;font-size:11px;line-height:1.5">
+          <div class="infobox yel" style="margin:0">
+            <b>Windows cần ImDisk Toolkit</b> để tạo RAM disk (miễn phí).<br>
+            <small>Không bật RAM mode vẫn watermark bình thường — file lưu vào Output.</small>
+            <ol id="ramSetupSteps" style="margin:6px 0 8px 18px;padding:0"></ol>
+            <button class="mini" type="button" onclick="openImdiskDownload()">⬇ Tải ImDisk Toolkit</button>
+          </div>
         </div>
         <div class="swrow">
           <div class="lbl">Xóa file sau khi up</div>
@@ -1220,29 +1228,68 @@ async function deleteCurrentOption(){
 }
 
 // ── RAM status ──
-async function refreshRamStatus(){
+let _lastRamLogKey='';
+async function openImdiskDownload(){
+  const url='https://sourceforge.net/projects/imdisk-toolkit/files/latest/download';
+  if(pywebview.api&&pywebview.api.open_external_url){
+    const r=await pywebview.api.open_external_url(url);
+    if(r&&r.ok)log('Đã mở trình duyệt tải ImDisk Toolkit','info');
+    else log('Không mở được link — tải thủ công: '+url,'warn');
+  }else{
+    window.open(url,'_blank');
+  }
+}
+function onRamToggle(){
+  refreshRamStatus(!isOn('tglRamUpload'));
+}
+async function refreshRamStatus(silent){
   const box=$('ramStatusBox');
-  if(!box||!pywebview.api||!pywebview.api.check_ram_status)return;
+  const setupBox=$('ramSetupBox');
+  if(!box||!pywebview.api||!pywebview.api.check_ram_status)return null;
   box.className='infobox ac';
   box.innerHTML='⏳ Đang kiểm tra RAM disk…';
   try{
     const st=await pywebview.api.check_ram_status(JSON.stringify(getConfig()));
     const ramOn=isOn('tglRamUpload');
     if(st.available){
+      if(setupBox)setupBox.style.display='none';
       box.className='infobox ac';
       box.innerHTML='✅ <b>RAM dùng được</b> — '+esc(st.message||'')+
         (st.hint?'<br><small>'+esc(st.hint)+'</small>':'');
-      log('💾 RAM OK: '+(st.message||''),'ok');
+      const logKey='ok|'+(st.message||'');
+      if(!silent&&_lastRamLogKey!==logKey){
+        log('💾 RAM OK: '+(st.message||''),'ok');
+        _lastRamLogKey=logKey;
+      }
     }else{
       box.className='infobox yel';
       box.innerHTML='⚠️ <b>RAM chưa sẵn sàng</b> — '+esc(st.message||'')+
         (st.hint?'<br><small>'+esc(st.hint)+'</small>':'')+
-        (ramOn?'<br><small><b>Đang bật RAM mode → batch sẽ DỪNG nếu chạy!</b></small>':'');
-      log('💾 RAM: '+(st.message||'Không có'),'warn');
+        (ramOn?'<br><small><b>Đang bật RAM mode → batch sẽ DỪNG!</b></small>':'');
+      if(setupBox){
+        setupBox.style.display='';
+        const ol=$('ramSetupSteps');
+        if(ol){
+          const steps=st.setup_steps||[
+            'Tải ImDisk Toolkit (free)',
+            'Cài đặt xong — khởi động lại app',
+            'Chuột phải app → Run as Administrator',
+            'Bật "RAM → Up → Xóa" trên tab này'
+          ];
+          ol.innerHTML=steps.map(s=>'<li>'+esc(s)+'</li>').join('');
+        }
+      }
+      const logKey='warn|'+(st.message||'')+'|'+ramOn;
+      if(!silent&&ramOn&&_lastRamLogKey!==logKey){
+        log('💾 RAM: '+(st.message||'Không có'),'warn');
+        _lastRamLogKey=logKey;
+      }
     }
+    return st;
   }catch(e){
     box.className='infobox yel';
     box.textContent='Không kiểm tra được RAM';
+    return null;
   }
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
@@ -1252,10 +1299,9 @@ async function startProcess(){
   if(running)return;
   if(!files.length){log('Quét thư mục trước khi chạy!','warn');return;}
   if(pywebview.api&&pywebview.api.check_ram_status){
-    const st=await pywebview.api.check_ram_status(JSON.stringify(getConfig()));
-    await refreshRamStatus();
-    if(isOn('tglRamUpload')&&!st.available){
-      log('✗ RAM mode đang BẬT nhưng không có RAM disk — cài ImDisk + Admin hoặc tắt RAM mode','err');
+    const st=await refreshRamStatus(true);
+    if(isOn('tglRamUpload')&&st&&!st.available){
+      log('✗ RAM mode BẬT nhưng không có RAM disk — cài ImDisk + Admin hoặc tắt RAM mode','err');
       return;
     }
   }
@@ -1390,7 +1436,7 @@ async function _init(){
     if(cfg)applyConfig(cfg);
   }catch(e){}
   await refreshOptions();
-  await refreshRamStatus();
+  await refreshRamStatus(true);
   setInterval(_ffPoll,400);
   updateCudaHint();
   log('Watermark Studio v7 sẵn sàng 🚀','ok');
