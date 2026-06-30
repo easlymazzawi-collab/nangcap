@@ -249,8 +249,9 @@ DEFAULT_CONFIG = {
     "fast_mode":  True,
     "nvenc_cq":       23,
     "nvenc_preset":   "p1",
-    "max_workers":    6,
-    "gpu_workers":    6,
+    "max_workers":    2,
+    "gpu_workers":    2,
+    "turbo_nvdec":    True,
     "cpu_workers":    0,
     "x264_preset":    "medium",
     "min_output_kb":  50,
@@ -324,6 +325,8 @@ _window           = None
 _running          = False
 _cancel_flag      = threading.Event()
 _outro_cache      = {}
+_center_png_cache = {}
+_text_png_cache   = {}
 _ffmpeg_log_lines = []
 _upload_log_lines = []   # log rieng cho upload Telegram
 
@@ -704,25 +707,159 @@ def build_video_cmd(cfg, inp, outp, fc, trim=None, dur_limit=None, norm_audio=Fa
     ]
 
 # ==============================================================================
-#  FAST MODE (overlay_cuda)
-#  Pipeline: CPU decode -> format=yuv420p -> hwupload -> overlay_cuda -> NVENC
-#  Speed: ~40x realtime. Logo alpha PNG giu nguyen (yuva420p).
-#  Khong dung hwaccel_output_format=cuda de tranh width alignment bug (720->736).
+#  TURBO RENDER — center/corner text PNG + NVDEC decode + overlay_cuda
+#  Pipeline: NVDEC -> crop_cuda -> overlay_cuda -> NVENC (~40-55x)
+#  Fix ảnh preset: chu giua + chu 4 goc = PNG overlay, khong drawtext CPU.
 # ==============================================================================
 
-def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_audio=False, mode=None, rotation=0):
-    """Pipeline overlay logo PNG -> NVENC.
+def _display_wh(w, h, rotation):
+    rot = int(rotation or 0)
+    if rot in (-90, 90, 270, -270):
+        return h, w
+    return w, h
 
-    PIPELINE A (mac dinh, ~40x):
-        CPU decode -> format=yuv420p -> hwupload [video]
-        logo PNG   -> format=yuva420p -> hwupload [logo]
-        overlay_cuda -> NVENC
-    Giu alpha PNG dung, kich thuoc video chinh xac (khong bi pad).
-    Fallback sang PIPELINE B neu co center text (drawtext la CPU filter).
+def _parse_font_color(color, default_alpha=255):
+    s = (color or "white").strip()
+    alpha = default_alpha
+    if "@" in s:
+        s, a = s.rsplit("@", 1)
+        try:
+            alpha = int(float(a) * 255)
+        except Exception:
+            pass
+    s = s.lower()
+    named = {"white": (255, 255, 255), "black": (0, 0, 0),
+             "red": (255, 0, 0), "yellow": (255, 255, 0)}
+    if s in named:
+        r, g, b = named[s]
+    elif s.startswith("#"):
+        r, g, b = _hex_to_rgb(s)
+    else:
+        r, g, b = 255, 255, 255
+    return (r, g, b, alpha)
 
-    PIPELINE B (~13x):
-        CPU overlay + NVENC. Dung khi co center text.
+def render_text_png(text, size, color, font_path, out_path, pad=4):
+    if not PIL_OK:
+        return False, "Can Pillow"
+    text = (text or "").strip()
+    if not text:
+        return False, "rong"
+    size = int(size or 22)
+    fill = _parse_font_color(color)
+    key  = hashlib.md5(
+        f"{text}|{size}|{color}|{font_path}|{pad}".encode("utf-8")
+    ).hexdigest()
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached = os.path.join(cache_dir, f"tx_{key}.png")
+    if key in _text_png_cache and os.path.isfile(_text_png_cache[key]):
+        cached = _text_png_cache[key]
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        if cached != out_path:
+            shutil.copy2(cached, out_path)
+        return True, ""
+    try:
+        font = ImageFont.truetype(font_path, size)
+    except Exception:
+        font = _pil_font(size)
+        if font is None:
+            return False, "font loi"
+    tmp  = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tmp)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw   = bbox[2] - bbox[0] + pad * 2
+    th   = bbox[3] - bbox[1] + pad * 2
+    img  = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+    img.save(cached, "PNG")
+    _text_png_cache[key] = cached
+    if cached != out_path:
+        shutil.copy2(cached, out_path)
+    return True, ""
+
+def _corner_text_overlays(cfg):
+    font_p = cfg.get("font_file", _default_font())
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    defs = [
+        ("tl", "text_top_left",     "top_left_size",     "top_left_color",
+         "10", "10"),
+        ("tr", "text_top_right",    "top_right_size",    "top_right_color",
+         "main_w-overlay_w-10", "10"),
+        ("bl", "text_bottom_left",  "bottom_left_size",  "bottom_left_color",
+         "10", "main_h-overlay_h-10"),
+        ("br", "text_bottom_right", "bottom_right_size", "bottom_right_color",
+         "main_w-overlay_w-10", "main_h-overlay_h-10"),
+    ]
+    out = []
+    for corner, text_k, size_k, color_k, ox, oy in defs:
+        txt = (cfg.get(text_k) or "").strip()
+        if not txt:
+            continue
+        if cfg.get(f"enable_{corner}") and os.path.isfile(cfg.get(f"logo_{corner}", "")):
+            continue
+        png = os.path.join(cache_dir,
+                           f"corner_{corner}_{hashlib.md5(txt.encode()).hexdigest()[:8]}.png")
+        ok, _ = render_text_png(txt, cfg.get(size_k, 22), cfg.get(color_k, "white"),
+                                font_p, png)
+        if ok:
+            out.append((png, ox, oy))
+    return out
+
+def render_center_text_png(cfg, width, height, out_path):
+    if not PIL_OK:
+        return False, "Can Pillow"
+    text = (cfg.get("center_text") or "").strip()
+    if not text:
+        return False, "rong"
+    width  = int(width)  - (int(width)  % 2)
+    height = int(height) - (int(height) % 2)
+    size   = int(cfg.get("center_size", 25))
+    op     = float(cfg.get("center_opacity", 0.15))
+    font_p = cfg.get("font_file", _default_font())
+    key    = hashlib.md5(
+        f"{text}|{size}|{op}|{width}|{height}|{font_p}".encode("utf-8")
+    ).hexdigest()
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached = os.path.join(cache_dir, f"ct_{key}.png")
+    if key in _center_png_cache and os.path.isfile(_center_png_cache[key]):
+        cached = _center_png_cache[key]
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        if cached != out_path:
+            shutil.copy2(cached, out_path)
+        return True, ""
+    try:
+        font = ImageFont.truetype(font_p, size)
+    except Exception:
+        font = _pil_font(size)
+        if font is None:
+            return False, "font loi"
+    img  = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw   = bbox[2] - bbox[0]
+    th   = bbox[3] - bbox[1]
+    x    = int((width - tw) / 4)
+    y    = int((height - th) / 2)
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, int(op * 255)))
+    img.save(cached, "PNG")
+    _center_png_cache[key] = cached
+    if cached != out_path:
+        shutil.copy2(cached, out_path)
+    return True, ""
+
+def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None,
+                   norm_audio=False, mode=None, rotation=0, video_w=None, video_h=None):
+    """Turbo: NVDEC + overlay_cuda (logo + chu PNG) -> NVENC.
+    Tra ve None neu can drawtext dong (center fade / HS preset).
     """
+    has_center = cfg.get("enable_center") and (cfg.get("center_text") or "").strip()
+    has_static_center = has_center and not cfg.get("enable_center_fade")
+    if has_center and not has_static_center:
+        return None
+
     ss     = ["-ss", str(trim)] if trim and trim > 0 else []
     t_args = ["-t", str(dur_limit)] if dur_limit is not None else []
     gpu_w    = max(1, int(cfg.get("gpu_workers", cfg.get("max_workers", 2)) or 2))
@@ -730,12 +867,8 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
     mx  = str(cfg.get("logo_margin_x", 15))
     my  = str(cfg.get("logo_margin_y", 15))
     et  = cfg.get("enable_time", 0)
-    # overlay_cuda khong ho tro enable expression.
-    # Dung tpad de pad logo voi start_duration=et giay trong suot (alpha=0).
-    # Hoat dong dung voi ca split_parts vi tpad tinh tuong doi voi dau segment.
     et_pad = f",tpad=start_duration={et}:start_mode=add:color=black@0" if et and et > 0 else ""
 
-    # Danh sach logo: (path, scale_w, opacity, x_expr, y_expr)
     logo_list = []
     if os.path.isfile(cfg.get("logo_image", "")):
         logo_list.append((
@@ -756,131 +889,104 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
         if cfg.get(en_k) and os.path.isfile(cfg.get(p_k, "")):
             logo_list.append((cfg[p_k], cfg.get(w_k, 120), cfg.get(op_k, 0.7), ox, oy))
 
-    has_center_text = cfg.get("enable_center") and cfg.get("center_text", "").strip()
+    corner_texts = _corner_text_overlays(cfg)
     extra_inputs = []
     fc_parts     = []
+    stream_in    = "[0:v]"
 
-    if not has_center_text:
-        # ============================================================
-        # PIPELINE A: overlay_cuda voi alpha PNG (~40x)
-        #
-        # Key insight: KHONG dung -hwaccel_output_format cuda.
-        # CPU decode -> format=yuv420p (khong bi pad width) -> hwupload.
-        # Logo: scale -> colorchannelmixer (opacity) -> tpad (enable_time delay)
-        #       -> format=yuva420p -> hwupload.
-        # overlay_cuda nhan yuv420p + yuva420p -> alpha blend dung.
-        # NVENC nhan cuda frame truc tiep tu overlay_cuda.
-        # ============================================================
-        stream_in = "[0:v]"
+    rot = int(rotation or 0)
+    if rot in (-90, 270):
+        xpose = "transpose=1,"
+    elif rot in (90, -270):
+        xpose = "transpose=2,"
+    elif rot in (180, -180):
+        xpose = "transpose=1,transpose=1,"
+    else:
+        xpose = ""
 
-        # Rotation: transpose CPU truoc hwupload (khong dung -autorotate vi anh huong ca logo input)
-        rot = int(rotation or 0)
-        if rot in (-90, 270):
-            xpose = "transpose=1,"
-        elif rot in (90, -270):
-            xpose = "transpose=2,"
-        elif rot in (180, -180):
-            xpose = "transpose=1,transpose=1,"
-        else:
-            xpose = ""
+    disp_w, disp_h = _display_wh(video_w, video_h, rot) if video_w and video_h else (None, None)
+    use_turbo = (cfg.get("turbo_nvdec", True) and rot == 0
+                 and disp_w and disp_h)
 
-        # Video main: CPU decode -> (transpose) -> yuv420p -> hwupload
+    if use_turbo:
+        fc_parts.append(f"[0:v]crop_cuda={disp_w}:{disp_h}[base]")
+        stream_in = "[base]"
+        hw_in = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    else:
         fc_parts.append(f"[0:v]{xpose}format=yuv420p,hwupload[base]")
         stream_in = "[base]"
+        hw_in = []
 
-        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
-            idx = i + 1
-            lbl = f"lg{i}"
-            out = f"v{i}"
-            extra_inputs += ["-i", lpath]
-            # Logo: scale + opacity + tpad delay + yuva420p + hwupload
-            fc_parts.append(
-                f"[{idx}:v]scale={lw}:-1,format=rgba,"
-                f"colorchannelmixer=aa={lop}"
-                f"{et_pad},"
-                f"format=yuva420p,hwupload[{lbl}]"
-            )
-            fc_parts.append(
-                f"{stream_in}[{lbl}]overlay_cuda=x={ox}:y={oy}[{out}]"
-            )
-            stream_in = f"[{out}]"
+    for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
+        idx = i + 1
+        lbl = f"lg{i}"
+        out = f"v{i}"
+        extra_inputs += ["-i", lpath]
+        fc_parts.append(
+            f"[{idx}:v]scale={lw}:-1,format=rgba,"
+            f"colorchannelmixer=aa={lop}"
+            f"{et_pad},"
+            f"format=yuva420p,hwupload[{lbl}]"
+        )
+        fc_parts.append(
+            f"{stream_in}[{lbl}]overlay_cuda=x={ox}:y={oy}[{out}]"
+        )
+        stream_in = f"[{out}]"
 
-        if not logo_list:
-            # Khong co logo nao — van encode GPU, van xu ly rotation
-            fc_parts = [f"[0:v]{xpose}format=yuv420p,hwupload[base]"]
-            stream_in = "[base]"
+    next_idx = len(logo_list) + 1
+    for j, (tpath, tox, toy) in enumerate(corner_texts):
+        idx = next_idx + j
+        lbl = f"tx{j}"
+        out = f"vt{j}"
+        extra_inputs += ["-i", tpath]
+        fc_parts.append(
+            f"[{idx}:v]format=rgba"
+            f"{et_pad},"
+            f"format=yuva420p,hwupload[{lbl}]"
+        )
+        fc_parts.append(
+            f"{stream_in}[{lbl}]overlay_cuda=x={tox}:y={toy}[{out}]"
+        )
+        stream_in = f"[{out}]"
 
-        return [
-            cfg["ffmpeg_path"], "-hide_banner",
-            "-init_hw_device", "cuda=gpu:0",
-            "-filter_hw_device", "gpu",
-            *ss,
-            "-i", inp,
-            *extra_inputs,
-            "-filter_complex", ";".join(fc_parts),
-            "-map", stream_in,
-            "-map", "0:a:0?",
-            *_audio_args(norm_audio),
-            "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
-            "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
-            "-surfaces", str(surfaces),
-            "-gpu", "0",
-            *t_args,
-            "-movflags", "+faststart", "-y", outp,
-        ]
+    if has_static_center and disp_w and disp_h:
+        center_png = os.path.join(tempfile.gettempdir(), "gpu_wm_text", "_center_live.png")
+        ok_ct, _ = render_center_text_png(cfg, disp_w, disp_h, center_png)
+        if not ok_ct:
+            return None
+        cidx = len(logo_list) + len(corner_texts) + 1
+        extra_inputs += ["-i", center_png]
+        fc_parts.append(f"[{cidx}:v]format=yuva420p,hwupload[ct]")
+        out_ct = "vct"
+        fc_parts.append(f"{stream_in}[ct]overlay_cuda=x=0:y=0[{out_ct}]")
+        stream_in = f"[{out_ct}]"
 
-    else:
-        # ============================================================
-        # PIPELINE B: CPU overlay + NVENC (~13x)
-        # Dung khi co center text (drawtext la CPU filter,
-        # khong chay duoc tren cuda frame).
-        # ============================================================
-        stream_in = "[0:v]"
-        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
-            idx = i + 1
-            lbl = f"lg{i}"
-            out = f"v{i}"
-            extra_inputs += ["-i", lpath]
-            fc_parts.append(
-                f"[{idx}:v]scale={lw}:-1,format=rgba,"
-                f"colorchannelmixer=aa={lop}[{lbl}];"
-                f"{stream_in}[{lbl}]overlay=x={ox}:y={oy}{ec}[{out}]"
-            )
-            stream_in = f"[{out}]"
-
-        if cfg.get("enable_center") and cfg.get("center_text", "").strip():
-            font = _escape_font(cfg.get("font_file", _default_font()))
-            txt  = cfg["center_text"].replace("'", "\'")
-            op   = cfg.get("center_opacity", 0.15)
-            sz   = cfg.get("center_size", 28)
-            out  = f"v{len(logo_list)}"
-            fc_parts.append(
-                f"{stream_in}drawtext=fontfile='{font}':text='{txt}':"
-                f"fontcolor=white@{op}:fontsize={sz}:"
-                f"x=(w-tw)/4:y=(h-th)/2{ec}[{out}]"
-            )
-            stream_in = f"[{out}]"
-
-        if fc_parts:
-            fc_parts.append(f"{stream_in}format=yuv420p[vout]")
+    if not logo_list and not has_static_center and not corner_texts:
+        if use_turbo:
+            fc_parts = [f"[0:v]crop_cuda={disp_w}:{disp_h}[base]"]
         else:
-            fc_parts.append("[0:v]format=yuv420p[vout]")
+            fc_parts = [f"[0:v]{xpose}format=yuv420p,hwupload[base]"]
+        stream_in = "[base]"
 
-        return [
-            cfg["ffmpeg_path"], "-hide_banner",
-            *ss, "-i", inp,
-            *extra_inputs,
-            "-filter_complex", ";".join(fc_parts),
-            "-map", "[vout]",
-            "-map", "0:a:0?",
-            *_audio_args(norm_audio),
-            "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
-            "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
-            "-surfaces", str(surfaces),
-            "-gpu", "0",
-            *t_args,
-            "-movflags", "+faststart", "-y", outp,
-        ]
+    return [
+        cfg["ffmpeg_path"], "-hide_banner",
+        "-init_hw_device", "cuda=gpu:0",
+        "-filter_hw_device", "gpu",
+        *ss,
+        *hw_in,
+        "-i", inp,
+        *extra_inputs,
+        "-filter_complex", ";".join(fc_parts),
+        "-map", stream_in,
+        "-map", "0:a:0?",
+        *_audio_args(norm_audio),
+        "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
+        "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
+        "-surfaces", str(surfaces),
+        "-gpu", "0",
+        *t_args,
+        "-movflags", "+faststart", "-y", outp,
+    ]
 # Cache ket qua probe overlay_cuda — chi test 1 lan / lan chay.
 # _FAST_CUDA_MODE: None=chua probe, 0=khong cong thuc nao chay, 1/2=cong thuc dung duoc.
 _FAST_CUDA_MODE = None
@@ -979,21 +1085,39 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
         w, h, pix = _probe_wh(ffprobe_p, inp)
         if w and h and pix not in TEN_BIT:
             rot = _get_rotation(ffprobe_p, inp)
-            cmd = build_fast_cmd(cfg, inp, outp, None, trim, dur_limit, norm_audio=norm_a, rotation=rot)
-            rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
-            low = stderr_txt.lower()
-            bad = ("failed to configure","unsupported","can't overlay",
-                   "error reinitializing","not implemented",
-                   "error while filtering","no such filter")
-            if rc == 0 and _is_valid(outp, min_kb) and not any(b in low for b in bad):
-                return True, True, ""
-            if _corrupt(stderr_txt):
-                return False, False, _encode_fail_reason(rc, stderr_txt, outp, min_kb, "file loi/hong")
-            # fast that bai -> ghi nhan, fallback sang drawtext
-            last_err = f"fast loi (rc={rc})"
-            if os.path.exists(outp):
+            cmd = build_fast_cmd(cfg, inp, outp, None, trim, dur_limit,
+                                 norm_audio=norm_a, rotation=rot,
+                                 video_w=w, video_h=h)
+            if cmd is not None:
+                rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
+                low = stderr_txt.lower()
+                bad = ("failed to configure","unsupported","can't overlay",
+                       "error reinitializing","not implemented",
+                       "error while filtering","no such filter",
+                       "crop_cuda","hwaccel")
+                if rc == 0 and _is_valid(outp, min_kb) and not any(b in low for b in bad):
+                    return True, True, ""
+                if cfg.get("turbo_nvdec", True) and rot == 0 and any(
+                        b in low for b in ("crop_cuda", "hwaccel")):
+                    cfg_fb = dict(cfg)
+                    cfg_fb["turbo_nvdec"] = False
+                    cmd = build_fast_cmd(cfg_fb, inp, outp, None, trim, dur_limit,
+                                         norm_audio=norm_a, rotation=rot,
+                                         video_w=w, video_h=h)
+                    if cmd is not None:
+                        rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
+                        low = stderr_txt.lower()
+                        if rc == 0 and _is_valid(outp, min_kb) and not any(
+                                b in low for b in bad if b not in ("crop_cuda", "hwaccel")):
+                            return True, True, ""
+                if _corrupt(stderr_txt):
+                    return False, False, _encode_fail_reason(rc, stderr_txt, outp, min_kb, "file loi/hong")
+                last_err = f"fast loi (rc={rc})"
+                if os.path.exists(outp):
                     try: os.remove(outp)
                     except: pass
+            else:
+                last_err = "can drawtext dong"
 
     # Lop 2: drawtext + NVENC
     cmd = build_video_cmd(cfg, inp, outp, fc, trim, dur_limit, norm_audio=norm_a)
@@ -1715,7 +1839,8 @@ class Api:
                 cfg_test = dict(cfg)
                 cfg_test["gpu_workers"] = 1
                 t0 = time.time()
-                cmd_ovl = build_fast_cmd(cfg_test, test_src, test_ovl, None)
+                cmd_ovl = build_fast_cmd(cfg_test, test_src, test_ovl, None,
+                                         video_w=1280, video_h=720)
                 rc, stderr = _run_ffmpeg(cmd_ovl, timeout=20)
                 elapsed = time.time() - t0
                 if rc == 0 and os.path.exists(test_ovl) and os.path.getsize(test_ovl) > 1000:
@@ -2310,8 +2435,10 @@ class Api:
             self._emit("done", {"ok": 0, "err": 0, "total": 0})
             return
 
-        global _outro_cache, _ffmpeg_log_lines, _upload_log_lines
+        global _outro_cache, _center_png_cache, _text_png_cache, _ffmpeg_log_lines, _upload_log_lines
         _outro_cache      = {}
+        _center_png_cache = {}
+        _text_png_cache   = {}
         _ffmpeg_log_lines = []
         _upload_log_lines = []
         if tg_on:
@@ -2322,8 +2449,9 @@ class Api:
         if not dynamic:
             self._emit("log", {"cls":"info","msg":"Dang kiem tra NVENC…"})
             if fast_cuda_supported(cfg):
+                turbo = " + NVDEC" if cfg.get("turbo_nvdec", True) else ""
                 self._emit("log", {"cls":"ok","msg":
-                    "✓ NVENC OK — pipeline: NVDEC decode + overlay CPU + NVENC encode 🚀"})
+                    f"✓ Turbo Render: overlay_cuda + PNG chữ giữa/góc{turbo} 🚀"})
             else:
                 cfg["_fast_ok"] = False
                 self._emit("log", {"cls":"warn","msg":
@@ -2340,7 +2468,7 @@ class Api:
                 "logo " + (f"AUTO {int(ratio*100)}% (>{int(thr)}s)" if thr > 0 else "FULL")]
         if parts > 1:               info.append(f"VA Pro {parts} phan")
         if not dynamic:
-            info.append("🚀 overlay_cuda")
+            info.append("🚀 Turbo overlay_cuda")
         else:
             info.append("✨ WM dong (HS preset)")
         if cfg.get("enable_outro"): info.append("🎬 outro")

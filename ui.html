@@ -645,7 +645,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac">
-          🚀 <b>overlay_cuda</b> mọi opacity — CUDA (~28-35x). Chỉ bật chữ giữa mới fallback CPU (~13x)
+          🚀 <b>Turbo Render</b> — Fix ảnh giữ chữ giữa/góc qua PNG + overlay_cuda + NVDEC (~40-55×). Đặt GPU workers = <b>2</b> trên RTX 3060.
         </div>
         <div class="row r2">
           <div class="fld"><label>Chất lượng (CQ)</label>
@@ -662,8 +662,8 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <div class="row r2">
           <div class="fld"><label>GPU workers</label>
             <select id="workersVal" onchange="$('nvencSessions').value=this.value">
-              <option>1</option><option>2</option><option>3</option>
-              <option>4</option><option selected>5</option><option>6</option><option>8</option>
+              <option>1</option><option selected>2</option><option>3</option>
+              <option>4</option><option>5</option><option>6</option><option>8</option>
             </select></div>
           <div class="fld"><label>Min output (KB)</label>
             <input type="number" id="minSize" value="50" min="1"></div>
@@ -1080,7 +1080,7 @@ function applyConfig(c){
   // Encode
   setV('cqVal',c.nvenc_cq||23);
   setV('presetVal',c.nvenc_preset||'p1');
-  setV('workersVal',c.gpu_workers||5);
+  setV('workersVal',c.gpu_workers||2);
   setV('cpuWorkersVal',c.cpu_workers||0);
   setV('nvencSessions',c.nvenc_sessions||5);
   setV('minSize',c.min_output_kb||50);
