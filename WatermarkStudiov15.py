@@ -15,6 +15,17 @@ except ImportError:
     GPU_DIRECT_OK = False
 
 try:
+    from ram_temp import resolve_temp_base, clear_cache as _clear_ram_temp_cache
+except ImportError:
+    def resolve_temp_base(cfg=None, ram_mode=False):
+        import tempfile
+        p = os.path.join(tempfile.gettempdir(), "GPUWM_ram")
+        os.makedirs(p, exist_ok=True)
+        return p, p
+    def _clear_ram_temp_cache():
+        pass
+
+try:
     from PIL import Image, ImageDraw, ImageFont
     PIL_OK = True
 except ImportError:
@@ -1099,7 +1110,7 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
                     ok_gd, err_gd, _meta = _gpu_direct.process(
                         cfg_gd, inp, outp,
                         trim=trim, dur_limit=dur_limit, norm_audio=norm_a,
-                        tmp_dir=(cfg.get("temp_dir") or "").strip() or None,
+                        tmp_dir=resolve_temp_base(cfg, ram_mode=bool(cfg.get("ram_upload")))[0],
                     )
                     if ok_gd and _is_valid(outp, min_kb):
                         return True, True, "gpu_direct"
@@ -2382,17 +2393,21 @@ class Api:
                 "msg": f"  ⬆ Prefix [{prefix}] xong {expect} file — up {len(ready)} file ngay..."})
             _do_upload_chunks(split_chunks(ready, album_max), f"[{prefix}]")
 
-        # Thu muc temp render: neu user tro vao RAM disk (vd R:\) thi dung,
-        # khong thi None = temp he thong mac dinh (SSD).
+        # Thu muc temp: tu dong chon RAM disk / tmpfs — khong can user nhap R:\
         _tmp_base = None
-        td = (cfg.get("temp_dir") or "").strip()
-        if td:
-            if os.path.isdir(td):
+        _ram_temp_label = ""
+        if cfg.get("ram_upload"):
+            _tmp_base, _ram_temp_label = resolve_temp_base(cfg, ram_mode=True)
+            self._emit("log", {"cls": "info", "msg": f"💾 Temp tu dong: {_ram_temp_label}"})
+        else:
+            td = (cfg.get("temp_dir") or "").strip()
+            if td and os.path.isdir(td):
                 _tmp_base = td
-                self._emit("log", {"cls":"info","msg":f"Temp render: {td}"})
-            else:
-                self._emit("log", {"cls":"warn",
-                    "msg":f"Temp '{td}' khong ton tai -> dung temp he thong"})
+                self._emit("log", {"cls": "info", "msg": f"Temp render: {td}"})
+            elif td:
+                self._emit("log", {"cls": "warn",
+                    "msg": f"Temp '{td}' khong ton tai -> tu dong chon temp he thong"})
+                _tmp_base, _ram_temp_label = resolve_temp_base(cfg, ram_mode=False)
 
         errors = []
         if not os.path.isfile(ff):
@@ -2482,6 +2497,7 @@ class Api:
         _text_png_cache   = {}
         _ffmpeg_log_lines = []
         _upload_log_lines = []
+        _clear_ram_temp_cache()
         if tg_on:
             _emit_upload(f"=== Auto upload BAT → {cfg.get('tg_target')} ===")
 
@@ -2524,13 +2540,10 @@ class Api:
             info.append("✨ WM dong (HS preset)")
         if cfg.get("enable_outro"): info.append("🎬 outro")
         if cfg.get("ram_upload"):   info.append("💾 RAM→Up→Xoa")
-        if cfg.get("ram_upload"):
-            td = (cfg.get("temp_dir") or "").strip() or tempfile.gettempdir()
-            self._emit("log", {"cls":"info",
-                "msg":f"💾 RAM mode: encode → {td} → up Telegram → xoa (khong ghi output SSD)"})
+        if cfg.get("ram_upload") and _ram_temp_label:
             if not auto_up:
-                self._emit("log", {"cls":"warn",
-                    "msg":"RAM mode nen bat Auto upload — neu khong file van nam tren temp"})
+                self._emit("log", {"cls": "warn",
+                    "msg": "RAM mode: nen bat Auto upload — file temp se xoa sau khi up"})
         self._emit("log", {"cls": "info", "msg": " | ".join(info)})
 
         # --- Trang thai dung chung giua cac luong ---
@@ -2569,10 +2582,9 @@ class Api:
             else:
                 duration   = _get_duration(ffprobe_p, inp)
                 tmp_dir    = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
-                # RAM upload: ghi temp (RAM disk), khong ghi output_folder tren SSD
-                if cfg.get("ram_upload") and _gpu_direct:
-                    dest_dir = (cfg.get("temp_dir") or "").strip() or tempfile.gettempdir()
-                    os.makedirs(dest_dir, exist_ok=True)
+                # RAM upload: tu dong chon temp, khong ghi output_folder SSD
+                if cfg.get("ram_upload"):
+                    dest_dir, _ = resolve_temp_base(cfg, ram_mode=True)
                 else:
                     dest_dir = out_dir
                 outp_final = os.path.join(dest_dir, name + suffix + ".mp4")

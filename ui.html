@@ -350,8 +350,6 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
     <div class="row r2">
       <div class="fld" style="flex:1"><label>Suffix</label><input id="outputSuffix" value="_vnclip"></div>
     </div>
-    <div class="fld"><label>Temp / RAM disk <small>vd R:\ — encode không ghi SSD</small></label>
-      <input id="tempDir" placeholder="R:\ hoặc để trống"></div>
     <div style="display:flex;gap:4px;margin:4px 0 8px">
       <button class="mini" style="flex:1;padding:6px" onclick="scanFolder()">🔍 Quét file</button>
       <button class="mini" style="flex:1;padding:6px" onclick="clearFiles()">✕ Xoá</button>
@@ -699,7 +697,7 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
           ⚠️ Mở Telegram Desktop, <b>click sẵn vào chat đích</b> trước khi chạy.
         </div>
         <div class="swrow">
-          <div class="lbl">RAM → Up → Xóa<small>Encode temp RAM, up Telegram, xóa ngay (không lưu SSD)</small></div>
+          <div class="lbl">RAM → Up → Xóa<small>Tool tự chọn RAM/tmpfs — không cần ổ R:\, không lưu output SSD</small></div>
           <div class="sw yel" id="tglRamUpload" onclick="tgl(this)"></div>
         </div>
         <div class="swrow">
@@ -983,7 +981,7 @@ function getConfig(){
     input_folder:v('inputFolder'),
     output_folder:v('outputFolder'),
     output_suffix:v('outputSuffix'),
-    temp_dir:v('tempDir'),
+    temp_dir:'',
     // Logo chính
     logo_image:v('logoFile'),
     logo_scale_w:vi('logoW'),
@@ -1103,7 +1101,6 @@ function applyConfig(c){
   setV('presetVal',c.nvenc_preset||'p1');
   setV('engineVal',c.encode_engine||'gpu_direct');
   setV('workersVal',c.gpu_workers||2);
-  setV('tempDir',c.temp_dir||'');
   setTgl('tglRamUpload',c.ram_upload);
   setTgl('tglDelAfterUp',c.delete_after_upload!=false);
   setV('cpuWorkersVal',c.cpu_workers||0);

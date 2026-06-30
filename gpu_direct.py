@@ -10,6 +10,7 @@ import time
 import numpy as np
 
 from wm_overlay import build_overlay_rgba, clear_overlay_cache
+from ram_temp import resolve_temp_base
 
 try:
     import PyNvVideoCodec as nvc
@@ -331,9 +332,5 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
 
 
 def ram_temp_path(cfg, basename):
-    """Duong dan temp uu tien RAM disk — khong ghi output SSD."""
-    base = (cfg.get("temp_dir") or "").strip()
-    if not base or not os.path.isdir(base):
-        base = tempfile.gettempdir()
-    os.makedirs(base, exist_ok=True)
+    base, _ = resolve_temp_base(cfg, ram_mode=True)
     return os.path.join(base, basename)
