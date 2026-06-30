@@ -332,5 +332,7 @@ def process(cfg, inp, outp, ffprobe_fn=None, trim=0, dur_limit=None,
 
 
 def ram_temp_path(cfg, basename):
-    base, _ = resolve_temp_base(cfg, ram_mode=True)
+    base, msg = resolve_temp_base(cfg, ram_mode=True)
+    if not base:
+        raise RuntimeError(msg or "RAM mode: khong co RAM disk")
     return os.path.join(base, basename)

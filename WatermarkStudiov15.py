@@ -15,11 +15,14 @@ except ImportError:
     GPU_DIRECT_OK = False
 
 try:
-    from ram_temp import resolve_temp_base, clear_cache as _clear_ram_temp_cache
+    from ram_temp import resolve_temp_base, clear_cache as _clear_ram_temp_cache, RAM_REQUIRED_MSG
 except ImportError:
+    RAM_REQUIRED_MSG = "Thieu module ram_temp.py"
     def resolve_temp_base(cfg=None, ram_mode=False):
+        if ram_mode:
+            return None, RAM_REQUIRED_MSG
         import tempfile
-        p = os.path.join(tempfile.gettempdir(), "GPUWM_ram")
+        p = os.path.join(tempfile.gettempdir(), "GPUWM_work")
         os.makedirs(p, exist_ok=True)
         return p, p
     def _clear_ram_temp_cache():
@@ -273,6 +276,7 @@ DEFAULT_CONFIG = {
     "encode_engine":  "gpu_direct",
     "ram_upload":     False,
     "delete_after_upload": True,
+    "ram_disk_mb":    4096,
     "cpu_workers":    0,
     "x264_preset":    "medium",
     "min_output_kb":  50,
@@ -1107,10 +1111,13 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
                 cfg_gd["_fps"] = _get_fps(ffprobe_p, inp)
                 rot = _get_rotation(ffprobe_p, inp)
                 if rot == 0 and GPU_DIRECT_OK:
+                    _ram_tmp = resolve_temp_base(cfg, ram_mode=bool(cfg.get("ram_upload")))
+                    if cfg.get("ram_upload") and not _ram_tmp[0]:
+                        return False, False, _ram_tmp[1] or RAM_REQUIRED_MSG
                     ok_gd, err_gd, _meta = _gpu_direct.process(
                         cfg_gd, inp, outp,
                         trim=trim, dur_limit=dur_limit, norm_audio=norm_a,
-                        tmp_dir=resolve_temp_base(cfg, ram_mode=bool(cfg.get("ram_upload")))[0],
+                        tmp_dir=_ram_tmp[0] if _ram_tmp[0] else None,
                     )
                     if ok_gd and _is_valid(outp, min_kb):
                         return True, True, "gpu_direct"
@@ -1859,6 +1866,18 @@ class Api:
         if _gpu_direct:
             chk("GPU Direct (PyNvVideoCodec)", GPU_DIRECT_OK,
                 _gpu_direct.capability_info() if GPU_DIRECT_OK else "pip install PyNvVideoCodec")
+        try:
+            from ram_temp import scan_ram_volumes, _find_imdisk
+            rams = scan_ram_volumes()
+            imd = _find_imdisk()
+            if rams:
+                chk("RAM disk", True, f"{rams[0][0]} ({rams[0][2]})")
+            elif imd:
+                chk("RAM disk", False, "Chua co o RAM — co ImDisk, can chay Admin de tu tao")
+            else:
+                chk("RAM disk", False, "Khong co RAM disk / ImDisk — RAM mode se LOI")
+        except ImportError:
+            pass
 
         # 4. NVENC hoat dong (encode 1s video test)
         import tempfile as _tmp
@@ -2398,7 +2417,13 @@ class Api:
         _ram_temp_label = ""
         if cfg.get("ram_upload"):
             _tmp_base, _ram_temp_label = resolve_temp_base(cfg, ram_mode=True)
-            self._emit("log", {"cls": "info", "msg": f"💾 Temp tu dong: {_ram_temp_label}"})
+            if not _tmp_base:
+                self._emit("log", {"cls": "err", "msg": f"✗ RAM mode: {_ram_temp_label}"})
+                self._emit("log", {"cls": "err", "msg":
+                    "  → Cai ImDisk Toolkit (free), chay app Admin, hoac tat RAM mode"})
+                self._emit("done", {"ok": 0, "err": 1, "total": 0})
+                return
+            self._emit("log", {"cls": "ok", "msg": f"💾 RAM OK: {_ram_temp_label}"})
         else:
             td = (cfg.get("temp_dir") or "").strip()
             if td and os.path.isdir(td):
@@ -2580,88 +2605,98 @@ class Api:
                 if success: produced.append(outp)
                 mode    = "anh"
             else:
-                duration   = _get_duration(ffprobe_p, inp)
-                tmp_dir    = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
-                # RAM upload: tu dong chon temp, khong ghi output_folder SSD
-                if cfg.get("ram_upload"):
-                    dest_dir, _ = resolve_temp_base(cfg, ram_mode=True)
-                else:
-                    dest_dir = out_dir
-                outp_final = os.path.join(dest_dir, name + suffix + ".mp4")
+                duration    = _get_duration(ffprobe_p, inp)
                 fail_reason = ""
-                # Canh bao som neu khong probe duoc duration (file loi/path xau)
-                if duration is None:
-                    fail_reason = "ffprobe khong doc duoc (file loi hoac path co ky tu la)"
-                try:
-                    def _do_part(p_start, p_limit, p_outp):
-                        nonlocal fail_reason
-                        cut = None
-                        if thr > 0 and duration and duration > thr:
-                            raw = (p_limit or (duration - (p_start or 0))) * ratio
-                            cut = round(raw, 2)
-                        fc_p   = build_filter_complex(cfg, is_img=False, cut=cut)
-                        wm_tmp = (os.path.join(tmp_dir, f"wm_{abs(hash(p_outp))}.mp4")
-                                  if cfg.get("enable_outro") else p_outp)
-                        s, fast, reason = encode_segment(cfg, ffprobe_p, inp, wm_tmp, fc_p,
-                                                         p_start, p_limit, use_gpu=use_gpu)
-                        enc_engine = reason if reason == "gpu_direct" else ""
-                        if not s and reason and reason != "gpu_direct":
-                            fail_reason = reason
-                        if enc_engine == "gpu_direct":
-                            tag = " [⚡direct]"
-                        else:
-                            tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
-                        if s and cfg.get("enable_outro"):
-                            s2, emsg = concat_outro(ff, ffprobe_p, wm_tmp, p_outp, cfg, tmp_dir)
-                            if not s2:
-                                with lock:
-                                    self._emit("log", {"cls":"warn","msg":f"  Outro loi: {emsg} -> dung ban khong outro"})
-                                try: shutil.copy2(wm_tmp, p_outp)
-                                except Exception as ce: fail_reason = f"copy fallback loi: {ce}"
-                            s   = _is_valid(p_outp, min_kb)
-                            if not s and not fail_reason:
-                                fail_reason = "sau outro: output khong hop le"
-                            tag += " +outro" if s else ""
-                        # --- Auto upload Telegram (neu bat) ---
-                        # File output da xong (dang o out_dir). Ghi nhan de auto up.
-                        if s:
-                            produced.append(p_outp)
-                        return s, tag
+                dest_dir    = out_dir
+                outp_final  = os.path.join(out_dir, name + suffix + ".mp4")
+                tmp_dir     = None
 
-                    if parts > 1 and duration:
-                        avail    = max(0.0, float(duration) - float(trim))
-                        n_parts  = max(1, int(avail)) if avail < parts else parts
-                        part_len = avail / n_parts
-                        ok_p     = 0
-                        for i in range(1, n_parts + 1):
-                            p_start = trim + (i-1) * part_len
-                            p_limit = part_len if i < n_parts else None
-                            p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
-                            s, _    = _do_part(p_start, p_limit, p_outp)
-                            if s: ok_p += 1
-                        success = ok_p == n_parts
-                        mode    = f"VA Pro {n_parts}p ({ok_p} OK)"
+                if cfg.get("ram_upload"):
+                    dest_dir, _rd = resolve_temp_base(cfg, ram_mode=True)
+                    if not dest_dir:
+                        success = False
+                        mode = _rd or RAM_REQUIRED_MSG
                     else:
-                        success, tag = _do_part(trim if trim else None, None, outp_final)
-                        cut_info = ""
-                        if thr > 0 and duration and duration > thr:
-                            cut      = round((duration - (trim or 0)) * ratio, 2)
-                            cut_info = f" logo {int(ratio*100)}% ({cut:.0f}s)"
-                        mode = (f"{duration:.0f}s" if duration else "?") + cut_info + tag
+                        outp_final = os.path.join(dest_dir, name + suffix + ".mp4")
+                        tmp_dir = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base or dest_dir)
+                else:
+                    tmp_dir = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
 
-                    if not success and fail_reason:
-                        mode = (mode + f" | {fail_reason}") if mode else fail_reason
+                if cfg.get("ram_upload") and not dest_dir:
+                    success = False
+                    mode = mode or RAM_REQUIRED_MSG
+                elif duration is None:
+                    success = False
+                    mode = "ffprobe khong doc duoc duration"
+                else:
+                    try:
+                        def _do_part(p_start, p_limit, p_outp):
+                            nonlocal fail_reason
+                            cut = None
+                            if thr > 0 and duration and duration > thr:
+                                raw = (p_limit or (duration - (p_start or 0))) * ratio
+                                cut = round(raw, 2)
+                            fc_p   = build_filter_complex(cfg, is_img=False, cut=cut)
+                            wm_tmp = (os.path.join(tmp_dir, f"wm_{abs(hash(p_outp))}.mp4")
+                                      if cfg.get("enable_outro") else p_outp)
+                            s, fast, reason = encode_segment(cfg, ffprobe_p, inp, wm_tmp, fc_p,
+                                                             p_start, p_limit, use_gpu=use_gpu)
+                            enc_engine = reason if reason == "gpu_direct" else ""
+                            if not s and reason and reason != "gpu_direct":
+                                fail_reason = reason
+                            if enc_engine == "gpu_direct":
+                                tag = " [⚡direct]"
+                            else:
+                                tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
+                            if s and cfg.get("enable_outro"):
+                                s2, emsg = concat_outro(ff, ffprobe_p, wm_tmp, p_outp, cfg, tmp_dir)
+                                if not s2:
+                                    with lock:
+                                        self._emit("log", {"cls":"warn","msg":f"  Outro loi: {emsg} -> dung ban khong outro"})
+                                    try: shutil.copy2(wm_tmp, p_outp)
+                                    except Exception as ce: fail_reason = f"copy fallback loi: {ce}"
+                                s   = _is_valid(p_outp, min_kb)
+                                if not s and not fail_reason:
+                                    fail_reason = "sau outro: output khong hop le"
+                                tag += " +outro" if s else ""
+                            if s:
+                                produced.append(p_outp)
+                            return s, tag
 
-                    if not success:
-                        # Don file output loi (chi trong out_dir; temp se bi xoa o finally)
-                        for f2 in ([os.path.join(out_dir, name + suffix + ".mp4")] +
-                                   [os.path.join(out_dir, f"{name}_part{i:02d}{suffix}.mp4")
-                                    for i in range(1, parts+1)]):
-                            if os.path.exists(f2):
-                                try: os.remove(f2)
-                                except: pass
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                        if parts > 1 and duration:
+                            avail    = max(0.0, float(duration) - float(trim))
+                            n_parts  = max(1, int(avail)) if avail < parts else parts
+                            part_len = avail / n_parts
+                            ok_p     = 0
+                            for i in range(1, n_parts + 1):
+                                p_start = trim + (i-1) * part_len
+                                p_limit = part_len if i < n_parts else None
+                                p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
+                                s, _    = _do_part(p_start, p_limit, p_outp)
+                                if s: ok_p += 1
+                            success = ok_p == n_parts
+                            mode    = f"VA Pro {n_parts}p ({ok_p} OK)"
+                        else:
+                            success, tag = _do_part(trim if trim else None, None, outp_final)
+                            cut_info = ""
+                            if thr > 0 and duration and duration > thr:
+                                cut      = round((duration - (trim or 0)) * ratio, 2)
+                                cut_info = f" logo {int(ratio*100)}% ({cut:.0f}s)"
+                            mode = (f"{duration:.0f}s" if duration else "?") + cut_info + tag
+
+                        if not success and fail_reason:
+                            mode = (mode + f" | {fail_reason}") if mode else fail_reason
+
+                        if not success:
+                            for f2 in ([os.path.join(dest_dir, name + suffix + ".mp4")] +
+                                       [os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
+                                        for i in range(1, parts+1)]):
+                                if os.path.exists(f2):
+                                    try: os.remove(f2)
+                                    except: pass
+                    finally:
+                        if tmp_dir:
+                            shutil.rmtree(tmp_dir, ignore_errors=True)
 
             enc_t = time.time() - t0
             # Speed THAT: ti le so voi realtime (giong ffmpeg). Anh khong co duration.
