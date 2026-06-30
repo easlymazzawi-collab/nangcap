@@ -645,7 +645,20 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
         <span class="hl">⚡ NVENC GPU</span><span class="arr">›</span></header>
       <div class="body">
         <div class="infobox ac">
-          🚀 <b>overlay_cuda</b> mọi opacity — CUDA (~28-35x). Chỉ bật chữ giữa mới fallback CPU (~13x)
+          ⚡ <b>GPU Direct</b> — NVDEC→CUDA overlay→NVENC (không FFmpeg filter). Cài: <code>pip install PyNvVideoCodec numpy</code> (+ <code>cupy-cuda12x</code> tùy chọn).
+        </div>
+        <div class="row r2">
+          <div class="fld"><label>Engine</label>
+            <select id="engineVal">
+              <option value="gpu_direct" selected>GPU Direct ⚡</option>
+              <option value="auto">Auto (Direct → FFmpeg)</option>
+              <option value="ffmpeg">FFmpeg Turbo only</option>
+            </select></div>
+          <div class="fld"><label>GPU workers</label>
+            <select id="workersVal" onchange="$('nvencSessions').value=this.value">
+              <option>1</option><option selected>2</option><option>3</option>
+              <option>4</option><option>5</option><option>6</option><option>8</option>
+            </select></div>
         </div>
         <div class="row r2">
           <div class="fld"><label>Chất lượng (CQ)</label>
@@ -660,11 +673,6 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
             </select></div>
         </div>
         <div class="row r2">
-          <div class="fld"><label>GPU workers</label>
-            <select id="workersVal" onchange="$('nvencSessions').value=this.value">
-              <option>1</option><option>2</option><option>3</option>
-              <option>4</option><option selected>5</option><option>6</option><option>8</option>
-            </select></div>
           <div class="fld"><label>Min output (KB)</label>
             <input type="number" id="minSize" value="50" min="1"></div>
         </div>
@@ -687,6 +695,26 @@ input[type=range]:hover::-webkit-slider-thumb{box-shadow:0 0 6px var(--acglow)}
       <div class="body">
         <div class="infobox yel">
           ⚠️ Mở Telegram Desktop, <b>click sẵn vào chat đích</b> trước khi chạy.
+        </div>
+        <div class="swrow">
+          <div class="lbl">RAM → Up → Xóa<small>Bắt buộc RAM disk — không fallback SSD. Cần ImDisk (Admin)</small></div>
+          <div class="sw yel" id="tglRamUpload" onclick="tgl(this);onRamToggle()"></div>
+        </div>
+        <div class="infobox ac" id="ramStatusBox" style="margin:6px 0;font-size:11px">
+          ⏳ Nhấn tab Upload hoặc Chạy để kiểm tra RAM…
+        </div>
+        <div id="ramSetupBox" style="display:none;margin:6px 0;font-size:11px;line-height:1.5">
+          <div class="infobox yel" style="margin:0">
+            <b>Windows cần ImDisk Toolkit</b> để tạo RAM disk (miễn phí).<br>
+            <small>Không bật RAM mode vẫn watermark bình thường — file lưu vào Output.</small>
+            <ol id="ramSetupSteps" style="margin:6px 0 8px 18px;padding:0"></ol>
+            <button class="mini" type="button" onclick="openImdiskDownload()">⬇ Tải ImDisk Toolkit</button>
+            <button class="mini" type="button" onclick="cleanupResources()" style="margin-left:6px">🧹 Dọn temp + ffmpeg</button>
+          </div>
+        </div>
+        <div class="swrow">
+          <div class="lbl">Xóa file sau khi up</div>
+          <div class="sw on" id="tglDelAfterUp" onclick="tgl(this)"></div>
         </div>
         <div class="swrow">
           <div class="lbl">Bật auto upload</div>
@@ -825,6 +853,7 @@ let files=[],running=false,barTimers={},lastErrLines=[];
 function switchTab(i){
   document.querySelectorAll('.stab').forEach((t,j)=>t.classList.toggle('act',j===i));
   document.querySelectorAll('.tab-body').forEach((t,j)=>t.classList.toggle('act',j===i));
+  if(i===3)refreshRamStatus(true);
 }
 
 // ── Pipeline status ──
@@ -1003,6 +1032,7 @@ function getConfig(){
     fast_mode:true,
     nvenc_cq:vi('cqVal'),
     nvenc_preset:v('presetVal'),
+    encode_engine:v('engineVal'),
     gpu_workers:vi('workersVal'),
     cpu_workers:vi('cpuWorkersVal'),
     nvenc_sessions:vi('nvencSessions'),
@@ -1029,6 +1059,8 @@ function getConfig(){
     upload_dialog_wait:vn('upDialogWait'),
     album_max:vi('albumMax'),
     upload_delay:vn('upDelay'),
+    ram_upload:isOn('tglRamUpload'),
+    delete_after_upload:isOn('tglDelAfterUp'),
   };
 }
 
@@ -1080,7 +1112,10 @@ function applyConfig(c){
   // Encode
   setV('cqVal',c.nvenc_cq||23);
   setV('presetVal',c.nvenc_preset||'p1');
-  setV('workersVal',c.gpu_workers||5);
+  setV('engineVal',c.encode_engine||'gpu_direct');
+  setV('workersVal',c.gpu_workers||2);
+  setTgl('tglRamUpload',c.ram_upload);
+  setTgl('tglDelAfterUp',c.delete_after_upload!=false);
   setV('cpuWorkersVal',c.cpu_workers||0);
   setV('nvencSessions',c.nvenc_sessions||5);
   setV('minSize',c.min_output_kb||50);
@@ -1193,10 +1228,90 @@ async function deleteCurrentOption(){
   log('Đã xóa option: '+name,'warn');
 }
 
+// ── RAM status ──
+let _lastRamLogKey='';
+async function openImdiskDownload(){
+  const url='https://sourceforge.net/projects/imdisk-toolkit/files/latest/download';
+  if(pywebview.api&&pywebview.api.open_external_url){
+    const r=await pywebview.api.open_external_url(url);
+    if(r&&r.ok)log('Đã mở trình duyệt tải ImDisk Toolkit','info');
+    else log('Không mở được link — tải thủ công: '+url,'warn');
+  }else{
+    window.open(url,'_blank');
+  }
+}
+async function cleanupResources(){
+  if(!pywebview.api||!pywebview.api.cleanup_resources)return;
+  const r=await pywebview.api.cleanup_resources();
+  log(r&&r.msg?r.msg:'Đã dọn xong','info');
+  await refreshRamStatus(true);
+}
+function onRamToggle(){
+  refreshRamStatus(!isOn('tglRamUpload'));
+}
+async function refreshRamStatus(silent){
+  const box=$('ramStatusBox');
+  const setupBox=$('ramSetupBox');
+  if(!box||!pywebview.api||!pywebview.api.check_ram_status)return null;
+  box.className='infobox ac';
+  box.innerHTML='⏳ Đang kiểm tra RAM disk…';
+  try{
+    const st=await pywebview.api.check_ram_status(JSON.stringify(getConfig()));
+    const ramOn=isOn('tglRamUpload');
+    if(st.available){
+      if(setupBox)setupBox.style.display='none';
+      box.className='infobox ac';
+      box.innerHTML='✅ <b>RAM dùng được</b> — '+esc(st.message||'')+
+        (st.hint?'<br><small>'+esc(st.hint)+'</small>':'');
+      const logKey='ok|'+(st.message||'');
+      if(!silent&&_lastRamLogKey!==logKey){
+        log('💾 RAM OK: '+(st.message||''),'ok');
+        _lastRamLogKey=logKey;
+      }
+    }else{
+      box.className='infobox yel';
+      box.innerHTML='⚠️ <b>RAM chưa sẵn sàng</b> — '+esc(st.message||'')+
+        (st.hint?'<br><small>'+esc(st.hint)+'</small>':'')+
+        (ramOn?'<br><small><b>Đang bật RAM mode → batch sẽ DỪNG!</b></small>':'');
+      if(setupBox){
+        setupBox.style.display='';
+        const ol=$('ramSetupSteps');
+        if(ol){
+          const steps=st.setup_steps||[
+            'Tải ImDisk Toolkit (free)',
+            'Cài đặt xong — khởi động lại app',
+            'Chuột phải app → Run as Administrator',
+            'Bật "RAM → Up → Xóa" trên tab này'
+          ];
+          ol.innerHTML=steps.map(s=>'<li>'+esc(s)+'</li>').join('');
+        }
+      }
+      const logKey='warn|'+(st.message||'')+'|'+ramOn;
+      if(!silent&&ramOn&&_lastRamLogKey!==logKey){
+        log('💾 RAM: '+(st.message||'Không có'),'warn');
+        _lastRamLogKey=logKey;
+      }
+    }
+    return st;
+  }catch(e){
+    box.className='infobox yel';
+    box.textContent='Không kiểm tra được RAM';
+    return null;
+  }
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
 // ── Run ──
 async function startProcess(){
   if(running)return;
   if(!files.length){log('Quét thư mục trước khi chạy!','warn');return;}
+  if(pywebview.api&&pywebview.api.check_ram_status){
+    const st=await refreshRamStatus(true);
+    if(isOn('tglRamUpload')&&st&&!st.available){
+      log('✗ RAM mode BẬT nhưng không có RAM disk — cài ImDisk + Admin hoặc tắt RAM mode','err');
+      return;
+    }
+  }
   running=true;$('runBtn').disabled=true;$('cancelBtn').disabled=false;
   $('logDot').classList.remove('idle');
   ['sOk','sErr'].forEach(id=>$(id).textContent='0');
@@ -1328,6 +1443,7 @@ async function _init(){
     if(cfg)applyConfig(cfg);
   }catch(e){}
   await refreshOptions();
+  await refreshRamStatus(true);
   setInterval(_ffPoll,400);
   updateCudaHint();
   log('Watermark Studio v7 sẵn sàng 🚀','ok');

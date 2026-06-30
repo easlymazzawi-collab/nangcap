@@ -1,11 +1,44 @@
 """
-GPU Watermark Studio v12
-Batch watermark video/image (overlay_cuda LUON BAT) + logo + 4 goc chu + outro
-+ Auto upload Telegram Desktop.
+GPU Watermark Studio v15
+Batch watermark — GPU Direct (PyNvVideoCodec) hoac FFmpeg Turbo fallback.
++ Auto upload Telegram Desktop (RAM temp, xoa sau up).
 
 UI tach rieng o file ui.html cung thu muc.
 """
-import os, sys, json, time, threading, subprocess, hashlib, tempfile, shutil, asyncio, webview
+import os, sys, json, time, threading, subprocess, hashlib, tempfile, shutil, asyncio, webview, atexit, gc
+
+try:
+    import gpu_direct as _gpu_direct
+    GPU_DIRECT_OK = _gpu_direct.is_available()
+except ImportError:
+    _gpu_direct = None
+    GPU_DIRECT_OK = False
+
+try:
+    from ram_temp import (
+        resolve_temp_base, clear_cache as _clear_ram_temp_cache, RAM_REQUIRED_MSG,
+        cleanup_work_dirs, kill_orphan_ffmpeg, detach_created_imdisks,
+    )
+except ImportError:
+    RAM_REQUIRED_MSG = "Thieu module ram_temp.py"
+    def resolve_temp_base(cfg=None, ram_mode=False):
+        if ram_mode:
+            return None, RAM_REQUIRED_MSG
+        import tempfile
+        p = os.path.join(tempfile.gettempdir(), "GPUWM_work")
+        os.makedirs(p, exist_ok=True)
+        return p, p
+    def _clear_ram_temp_cache():
+        pass
+
+    def cleanup_work_dirs(cfg=None, include_ssd=True):
+        return 0
+
+    def kill_orphan_ffmpeg():
+        return False
+
+    def detach_created_imdisks():
+        pass
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -179,6 +212,50 @@ def split_chunks(files, max_size=10):
     return [files[i:i+sz] for i in range(0, n, sz)]
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+
+def _kill_ffmpeg_processes():
+    if sys.platform != "win32":
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
+def _startup_cleanup():
+    """Don rac tu lan chay truoc (crash/OOM)."""
+    kill_orphan_ffmpeg()
+    try:
+        n = cleanup_work_dirs(include_ssd=True)
+        if n:
+            print(f"[cleanup] Da xoa {n} temp con sot")
+    except Exception:
+        pass
+
+
+def _shutdown_cleanup():
+    """Khi tat app — kill ffmpeg + temp (ImDisk R: user tu tao giu nguyen)."""
+    _kill_ffmpeg_processes()
+    try:
+        cleanup_work_dirs(include_ssd=True)
+    except Exception:
+        pass
+    try:
+        from wm_overlay import clear_overlay_cache
+        clear_overlay_cache()
+    except Exception:
+        pass
+    try:
+        _clear_ram_temp_cache()
+    except Exception:
+        pass
+    gc.collect()
+
 APP_DIR     = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 CONFIG_PATH = os.path.join(APP_DIR, "wm_config.json")
 UI_PATH     = os.path.join(APP_DIR, "ui.html")
@@ -249,8 +326,13 @@ DEFAULT_CONFIG = {
     "fast_mode":  True,
     "nvenc_cq":       23,
     "nvenc_preset":   "p1",
-    "max_workers":    6,
-    "gpu_workers":    6,
+    "max_workers":    2,
+    "gpu_workers":    1,
+    "turbo_nvdec":    True,
+    "encode_engine":  "gpu_direct",
+    "ram_upload":     False,
+    "delete_after_upload": True,
+    "ram_disk_mb":    4096,
     "cpu_workers":    0,
     "x264_preset":    "medium",
     "min_output_kb":  50,
@@ -324,6 +406,8 @@ _window           = None
 _running          = False
 _cancel_flag      = threading.Event()
 _outro_cache      = {}
+_center_png_cache = {}
+_text_png_cache   = {}
 _ffmpeg_log_lines = []
 _upload_log_lines = []   # log rieng cho upload Telegram
 
@@ -704,25 +788,159 @@ def build_video_cmd(cfg, inp, outp, fc, trim=None, dur_limit=None, norm_audio=Fa
     ]
 
 # ==============================================================================
-#  FAST MODE (overlay_cuda)
-#  Pipeline: CPU decode -> format=yuv420p -> hwupload -> overlay_cuda -> NVENC
-#  Speed: ~40x realtime. Logo alpha PNG giu nguyen (yuva420p).
-#  Khong dung hwaccel_output_format=cuda de tranh width alignment bug (720->736).
+#  TURBO RENDER — center/corner text PNG + NVDEC decode + overlay_cuda
+#  Pipeline: NVDEC -> crop_cuda -> overlay_cuda -> NVENC (~40-55x)
+#  Fix ảnh preset: chu giua + chu 4 goc = PNG overlay, khong drawtext CPU.
 # ==============================================================================
 
-def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_audio=False, mode=None, rotation=0):
-    """Pipeline overlay logo PNG -> NVENC.
+def _display_wh(w, h, rotation):
+    rot = int(rotation or 0)
+    if rot in (-90, 90, 270, -270):
+        return h, w
+    return w, h
 
-    PIPELINE A (mac dinh, ~40x):
-        CPU decode -> format=yuv420p -> hwupload [video]
-        logo PNG   -> format=yuva420p -> hwupload [logo]
-        overlay_cuda -> NVENC
-    Giu alpha PNG dung, kich thuoc video chinh xac (khong bi pad).
-    Fallback sang PIPELINE B neu co center text (drawtext la CPU filter).
+def _parse_font_color(color, default_alpha=255):
+    s = (color or "white").strip()
+    alpha = default_alpha
+    if "@" in s:
+        s, a = s.rsplit("@", 1)
+        try:
+            alpha = int(float(a) * 255)
+        except Exception:
+            pass
+    s = s.lower()
+    named = {"white": (255, 255, 255), "black": (0, 0, 0),
+             "red": (255, 0, 0), "yellow": (255, 255, 0)}
+    if s in named:
+        r, g, b = named[s]
+    elif s.startswith("#"):
+        r, g, b = _hex_to_rgb(s)
+    else:
+        r, g, b = 255, 255, 255
+    return (r, g, b, alpha)
 
-    PIPELINE B (~13x):
-        CPU overlay + NVENC. Dung khi co center text.
+def render_text_png(text, size, color, font_path, out_path, pad=4):
+    if not PIL_OK:
+        return False, "Can Pillow"
+    text = (text or "").strip()
+    if not text:
+        return False, "rong"
+    size = int(size or 22)
+    fill = _parse_font_color(color)
+    key  = hashlib.md5(
+        f"{text}|{size}|{color}|{font_path}|{pad}".encode("utf-8")
+    ).hexdigest()
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached = os.path.join(cache_dir, f"tx_{key}.png")
+    if key in _text_png_cache and os.path.isfile(_text_png_cache[key]):
+        cached = _text_png_cache[key]
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        if cached != out_path:
+            shutil.copy2(cached, out_path)
+        return True, ""
+    try:
+        font = ImageFont.truetype(font_path, size)
+    except Exception:
+        font = _pil_font(size)
+        if font is None:
+            return False, "font loi"
+    tmp  = Image.new("RGBA", (4, 4), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tmp)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw   = bbox[2] - bbox[0] + pad * 2
+    th   = bbox[3] - bbox[1] + pad * 2
+    img  = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+    img.save(cached, "PNG")
+    _text_png_cache[key] = cached
+    if cached != out_path:
+        shutil.copy2(cached, out_path)
+    return True, ""
+
+def _corner_text_overlays(cfg):
+    font_p = cfg.get("font_file", _default_font())
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    defs = [
+        ("tl", "text_top_left",     "top_left_size",     "top_left_color",
+         "10", "10"),
+        ("tr", "text_top_right",    "top_right_size",    "top_right_color",
+         "main_w-overlay_w-10", "10"),
+        ("bl", "text_bottom_left",  "bottom_left_size",  "bottom_left_color",
+         "10", "main_h-overlay_h-10"),
+        ("br", "text_bottom_right", "bottom_right_size", "bottom_right_color",
+         "main_w-overlay_w-10", "main_h-overlay_h-10"),
+    ]
+    out = []
+    for corner, text_k, size_k, color_k, ox, oy in defs:
+        txt = (cfg.get(text_k) or "").strip()
+        if not txt:
+            continue
+        if cfg.get(f"enable_{corner}") and os.path.isfile(cfg.get(f"logo_{corner}", "")):
+            continue
+        png = os.path.join(cache_dir,
+                           f"corner_{corner}_{hashlib.md5(txt.encode()).hexdigest()[:8]}.png")
+        ok, _ = render_text_png(txt, cfg.get(size_k, 22), cfg.get(color_k, "white"),
+                                font_p, png)
+        if ok:
+            out.append((png, ox, oy))
+    return out
+
+def render_center_text_png(cfg, width, height, out_path):
+    if not PIL_OK:
+        return False, "Can Pillow"
+    text = (cfg.get("center_text") or "").strip()
+    if not text:
+        return False, "rong"
+    width  = int(width)  - (int(width)  % 2)
+    height = int(height) - (int(height) % 2)
+    size   = int(cfg.get("center_size", 25))
+    op     = float(cfg.get("center_opacity", 0.15))
+    font_p = cfg.get("font_file", _default_font())
+    key    = hashlib.md5(
+        f"{text}|{size}|{op}|{width}|{height}|{font_p}".encode("utf-8")
+    ).hexdigest()
+    cache_dir = os.path.join(tempfile.gettempdir(), "gpu_wm_text")
+    os.makedirs(cache_dir, exist_ok=True)
+    cached = os.path.join(cache_dir, f"ct_{key}.png")
+    if key in _center_png_cache and os.path.isfile(_center_png_cache[key]):
+        cached = _center_png_cache[key]
+    if os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        if cached != out_path:
+            shutil.copy2(cached, out_path)
+        return True, ""
+    try:
+        font = ImageFont.truetype(font_p, size)
+    except Exception:
+        font = _pil_font(size)
+        if font is None:
+            return False, "font loi"
+    img  = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw   = bbox[2] - bbox[0]
+    th   = bbox[3] - bbox[1]
+    x    = int((width - tw) / 4)
+    y    = int((height - th) / 2)
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, int(op * 255)))
+    img.save(cached, "PNG")
+    _center_png_cache[key] = cached
+    if cached != out_path:
+        shutil.copy2(cached, out_path)
+    return True, ""
+
+def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None,
+                   norm_audio=False, mode=None, rotation=0, video_w=None, video_h=None):
+    """Turbo: NVDEC + overlay_cuda (logo + chu PNG) -> NVENC.
+    Tra ve None neu can drawtext dong (center fade / HS preset).
     """
+    has_center = cfg.get("enable_center") and (cfg.get("center_text") or "").strip()
+    has_static_center = has_center and not cfg.get("enable_center_fade")
+    if has_center and not has_static_center:
+        return None
+
     ss     = ["-ss", str(trim)] if trim and trim > 0 else []
     t_args = ["-t", str(dur_limit)] if dur_limit is not None else []
     gpu_w    = max(1, int(cfg.get("gpu_workers", cfg.get("max_workers", 2)) or 2))
@@ -730,12 +948,8 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
     mx  = str(cfg.get("logo_margin_x", 15))
     my  = str(cfg.get("logo_margin_y", 15))
     et  = cfg.get("enable_time", 0)
-    # overlay_cuda khong ho tro enable expression.
-    # Dung tpad de pad logo voi start_duration=et giay trong suot (alpha=0).
-    # Hoat dong dung voi ca split_parts vi tpad tinh tuong doi voi dau segment.
     et_pad = f",tpad=start_duration={et}:start_mode=add:color=black@0" if et and et > 0 else ""
 
-    # Danh sach logo: (path, scale_w, opacity, x_expr, y_expr)
     logo_list = []
     if os.path.isfile(cfg.get("logo_image", "")):
         logo_list.append((
@@ -756,131 +970,104 @@ def build_fast_cmd(cfg, inp, outp, wm_png=None, trim=None, dur_limit=None, norm_
         if cfg.get(en_k) and os.path.isfile(cfg.get(p_k, "")):
             logo_list.append((cfg[p_k], cfg.get(w_k, 120), cfg.get(op_k, 0.7), ox, oy))
 
-    has_center_text = cfg.get("enable_center") and cfg.get("center_text", "").strip()
+    corner_texts = _corner_text_overlays(cfg)
     extra_inputs = []
     fc_parts     = []
+    stream_in    = "[0:v]"
 
-    if not has_center_text:
-        # ============================================================
-        # PIPELINE A: overlay_cuda voi alpha PNG (~40x)
-        #
-        # Key insight: KHONG dung -hwaccel_output_format cuda.
-        # CPU decode -> format=yuv420p (khong bi pad width) -> hwupload.
-        # Logo: scale -> colorchannelmixer (opacity) -> tpad (enable_time delay)
-        #       -> format=yuva420p -> hwupload.
-        # overlay_cuda nhan yuv420p + yuva420p -> alpha blend dung.
-        # NVENC nhan cuda frame truc tiep tu overlay_cuda.
-        # ============================================================
-        stream_in = "[0:v]"
+    rot = int(rotation or 0)
+    if rot in (-90, 270):
+        xpose = "transpose=1,"
+    elif rot in (90, -270):
+        xpose = "transpose=2,"
+    elif rot in (180, -180):
+        xpose = "transpose=1,transpose=1,"
+    else:
+        xpose = ""
 
-        # Rotation: transpose CPU truoc hwupload (khong dung -autorotate vi anh huong ca logo input)
-        rot = int(rotation or 0)
-        if rot in (-90, 270):
-            xpose = "transpose=1,"
-        elif rot in (90, -270):
-            xpose = "transpose=2,"
-        elif rot in (180, -180):
-            xpose = "transpose=1,transpose=1,"
-        else:
-            xpose = ""
+    disp_w, disp_h = _display_wh(video_w, video_h, rot) if video_w and video_h else (None, None)
+    use_turbo = (cfg.get("turbo_nvdec", True) and rot == 0
+                 and disp_w and disp_h)
 
-        # Video main: CPU decode -> (transpose) -> yuv420p -> hwupload
+    if use_turbo:
+        fc_parts.append(f"[0:v]crop_cuda={disp_w}:{disp_h}[base]")
+        stream_in = "[base]"
+        hw_in = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    else:
         fc_parts.append(f"[0:v]{xpose}format=yuv420p,hwupload[base]")
         stream_in = "[base]"
+        hw_in = []
 
-        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
-            idx = i + 1
-            lbl = f"lg{i}"
-            out = f"v{i}"
-            extra_inputs += ["-i", lpath]
-            # Logo: scale + opacity + tpad delay + yuva420p + hwupload
-            fc_parts.append(
-                f"[{idx}:v]scale={lw}:-1,format=rgba,"
-                f"colorchannelmixer=aa={lop}"
-                f"{et_pad},"
-                f"format=yuva420p,hwupload[{lbl}]"
-            )
-            fc_parts.append(
-                f"{stream_in}[{lbl}]overlay_cuda=x={ox}:y={oy}[{out}]"
-            )
-            stream_in = f"[{out}]"
+    for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
+        idx = i + 1
+        lbl = f"lg{i}"
+        out = f"v{i}"
+        extra_inputs += ["-i", lpath]
+        fc_parts.append(
+            f"[{idx}:v]scale={lw}:-1,format=rgba,"
+            f"colorchannelmixer=aa={lop}"
+            f"{et_pad},"
+            f"format=yuva420p,hwupload[{lbl}]"
+        )
+        fc_parts.append(
+            f"{stream_in}[{lbl}]overlay_cuda=x={ox}:y={oy}[{out}]"
+        )
+        stream_in = f"[{out}]"
 
-        if not logo_list:
-            # Khong co logo nao — van encode GPU, van xu ly rotation
-            fc_parts = [f"[0:v]{xpose}format=yuv420p,hwupload[base]"]
-            stream_in = "[base]"
+    next_idx = len(logo_list) + 1
+    for j, (tpath, tox, toy) in enumerate(corner_texts):
+        idx = next_idx + j
+        lbl = f"tx{j}"
+        out = f"vt{j}"
+        extra_inputs += ["-i", tpath]
+        fc_parts.append(
+            f"[{idx}:v]format=rgba"
+            f"{et_pad},"
+            f"format=yuva420p,hwupload[{lbl}]"
+        )
+        fc_parts.append(
+            f"{stream_in}[{lbl}]overlay_cuda=x={tox}:y={toy}[{out}]"
+        )
+        stream_in = f"[{out}]"
 
-        return [
-            cfg["ffmpeg_path"], "-hide_banner",
-            "-init_hw_device", "cuda=gpu:0",
-            "-filter_hw_device", "gpu",
-            *ss,
-            "-i", inp,
-            *extra_inputs,
-            "-filter_complex", ";".join(fc_parts),
-            "-map", stream_in,
-            "-map", "0:a:0?",
-            *_audio_args(norm_audio),
-            "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
-            "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
-            "-surfaces", str(surfaces),
-            "-gpu", "0",
-            *t_args,
-            "-movflags", "+faststart", "-y", outp,
-        ]
+    if has_static_center and disp_w and disp_h:
+        center_png = os.path.join(tempfile.gettempdir(), "gpu_wm_text", "_center_live.png")
+        ok_ct, _ = render_center_text_png(cfg, disp_w, disp_h, center_png)
+        if not ok_ct:
+            return None
+        cidx = len(logo_list) + len(corner_texts) + 1
+        extra_inputs += ["-i", center_png]
+        fc_parts.append(f"[{cidx}:v]format=yuva420p,hwupload[ct]")
+        out_ct = "vct"
+        fc_parts.append(f"{stream_in}[ct]overlay_cuda=x=0:y=0[{out_ct}]")
+        stream_in = f"[{out_ct}]"
 
-    else:
-        # ============================================================
-        # PIPELINE B: CPU overlay + NVENC (~13x)
-        # Dung khi co center text (drawtext la CPU filter,
-        # khong chay duoc tren cuda frame).
-        # ============================================================
-        stream_in = "[0:v]"
-        for i, (lpath, lw, lop, ox, oy) in enumerate(logo_list):
-            idx = i + 1
-            lbl = f"lg{i}"
-            out = f"v{i}"
-            extra_inputs += ["-i", lpath]
-            fc_parts.append(
-                f"[{idx}:v]scale={lw}:-1,format=rgba,"
-                f"colorchannelmixer=aa={lop}[{lbl}];"
-                f"{stream_in}[{lbl}]overlay=x={ox}:y={oy}{ec}[{out}]"
-            )
-            stream_in = f"[{out}]"
-
-        if cfg.get("enable_center") and cfg.get("center_text", "").strip():
-            font = _escape_font(cfg.get("font_file", _default_font()))
-            txt  = cfg["center_text"].replace("'", "\'")
-            op   = cfg.get("center_opacity", 0.15)
-            sz   = cfg.get("center_size", 28)
-            out  = f"v{len(logo_list)}"
-            fc_parts.append(
-                f"{stream_in}drawtext=fontfile='{font}':text='{txt}':"
-                f"fontcolor=white@{op}:fontsize={sz}:"
-                f"x=(w-tw)/4:y=(h-th)/2{ec}[{out}]"
-            )
-            stream_in = f"[{out}]"
-
-        if fc_parts:
-            fc_parts.append(f"{stream_in}format=yuv420p[vout]")
+    if not logo_list and not has_static_center and not corner_texts:
+        if use_turbo:
+            fc_parts = [f"[0:v]crop_cuda={disp_w}:{disp_h}[base]"]
         else:
-            fc_parts.append("[0:v]format=yuv420p[vout]")
+            fc_parts = [f"[0:v]{xpose}format=yuv420p,hwupload[base]"]
+        stream_in = "[base]"
 
-        return [
-            cfg["ffmpeg_path"], "-hide_banner",
-            *ss, "-i", inp,
-            *extra_inputs,
-            "-filter_complex", ";".join(fc_parts),
-            "-map", "[vout]",
-            "-map", "0:a:0?",
-            *_audio_args(norm_audio),
-            "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
-            "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
-            "-surfaces", str(surfaces),
-            "-gpu", "0",
-            *t_args,
-            "-movflags", "+faststart", "-y", outp,
-        ]
+    return [
+        cfg["ffmpeg_path"], "-hide_banner",
+        "-init_hw_device", "cuda=gpu:0",
+        "-filter_hw_device", "gpu",
+        *ss,
+        *hw_in,
+        "-i", inp,
+        *extra_inputs,
+        "-filter_complex", ";".join(fc_parts),
+        "-map", stream_in,
+        "-map", "0:a:0?",
+        *_audio_args(norm_audio),
+        "-c:v", "h264_nvenc", "-preset", cfg["nvenc_preset"],
+        "-rc", "constqp", "-qp", str(cfg["nvenc_cq"]),
+        "-surfaces", str(surfaces),
+        "-gpu", "0",
+        *t_args,
+        "-movflags", "+faststart", "-y", outp,
+    ]
 # Cache ket qua probe overlay_cuda — chi test 1 lan / lan chay.
 # _FAST_CUDA_MODE: None=chua probe, 0=khong cong thuc nao chay, 1/2=cong thuc dung duoc.
 _FAST_CUDA_MODE = None
@@ -970,30 +1157,78 @@ def encode_segment(cfg, ffprobe_p, inp, outp, fc, trim=None, dur_limit=None, use
             except: pass
         return False, False, reason
 
-    # --- GPU worker: fast mode (overlay logo PNG goc truc tiep + NVENC) ---
-    # v7.3: bo render_wm_template, build_fast_cmd tu lay logo PNG tu cfg.
-    # HS preset co dynamic WM (DVD/bounce) -> fallback drawtext CPU tu dong.
-    want_fast = (not _has_dynamic_wm(cfg) and cfg.get("_fast_ok", True))
+    # --- GPU Direct: NVDEC -> CUDA overlay -> NVENC (khong FFmpeg filter) ---
+    engine = (cfg.get("encode_engine") or "auto").lower()
     last_err = ""
+    if use_gpu and not _has_dynamic_wm(cfg) and engine in ("gpu_direct", "auto") and _gpu_direct:
+        if GPU_DIRECT_OK or engine == "gpu_direct":
+            try:
+                cfg_gd = dict(cfg)
+                cfg_gd["_fps"] = _get_fps(ffprobe_p, inp)
+                rot = _get_rotation(ffprobe_p, inp)
+                if rot == 0 and GPU_DIRECT_OK:
+                    _ram_tmp = resolve_temp_base(cfg, ram_mode=bool(cfg.get("ram_upload")))
+                    if cfg.get("ram_upload") and not _ram_tmp[0]:
+                        return False, False, _ram_tmp[1] or RAM_REQUIRED_MSG
+                    ok_gd, err_gd, _meta = _gpu_direct.process(
+                        cfg_gd, inp, outp,
+                        trim=trim, dur_limit=dur_limit, norm_audio=norm_a,
+                        tmp_dir=_ram_tmp[0] if _ram_tmp[0] else None,
+                    )
+                    if ok_gd and _is_valid(outp, min_kb):
+                        return True, True, "gpu_direct"
+                    last_err = err_gd or "gpu_direct loi"
+                    if engine == "gpu_direct":
+                        if os.path.exists(outp):
+                            try: os.remove(outp)
+                            except: pass
+                        return False, False, last_err
+                elif engine == "gpu_direct":
+                    return False, False, "GPU Direct can PyNvVideoCodec hoac video bi xoay"
+            except Exception as e:
+                last_err = f"gpu_direct: {e}"
+                if engine == "gpu_direct":
+                    return False, False, last_err
+
+    # --- GPU worker: FFmpeg Turbo (overlay_cuda fallback) ---
+    want_fast = (not _has_dynamic_wm(cfg) and cfg.get("_fast_ok", True))
     if want_fast:
         w, h, pix = _probe_wh(ffprobe_p, inp)
         if w and h and pix not in TEN_BIT:
             rot = _get_rotation(ffprobe_p, inp)
-            cmd = build_fast_cmd(cfg, inp, outp, None, trim, dur_limit, norm_audio=norm_a, rotation=rot)
-            rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
-            low = stderr_txt.lower()
-            bad = ("failed to configure","unsupported","can't overlay",
-                   "error reinitializing","not implemented",
-                   "error while filtering","no such filter")
-            if rc == 0 and _is_valid(outp, min_kb) and not any(b in low for b in bad):
-                return True, True, ""
-            if _corrupt(stderr_txt):
-                return False, False, _encode_fail_reason(rc, stderr_txt, outp, min_kb, "file loi/hong")
-            # fast that bai -> ghi nhan, fallback sang drawtext
-            last_err = f"fast loi (rc={rc})"
-            if os.path.exists(outp):
+            cmd = build_fast_cmd(cfg, inp, outp, None, trim, dur_limit,
+                                 norm_audio=norm_a, rotation=rot,
+                                 video_w=w, video_h=h)
+            if cmd is not None:
+                rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
+                low = stderr_txt.lower()
+                bad = ("failed to configure","unsupported","can't overlay",
+                       "error reinitializing","not implemented",
+                       "error while filtering","no such filter",
+                       "crop_cuda","hwaccel")
+                if rc == 0 and _is_valid(outp, min_kb) and not any(b in low for b in bad):
+                    return True, True, ""
+                if cfg.get("turbo_nvdec", True) and rot == 0 and any(
+                        b in low for b in ("crop_cuda", "hwaccel")):
+                    cfg_fb = dict(cfg)
+                    cfg_fb["turbo_nvdec"] = False
+                    cmd = build_fast_cmd(cfg_fb, inp, outp, None, trim, dur_limit,
+                                         norm_audio=norm_a, rotation=rot,
+                                         video_w=w, video_h=h)
+                    if cmd is not None:
+                        rc, stderr_txt = _run_nvenc(cmd, timeout=enc_to)
+                        low = stderr_txt.lower()
+                        if rc == 0 and _is_valid(outp, min_kb) and not any(
+                                b in low for b in bad if b not in ("crop_cuda", "hwaccel")):
+                            return True, True, ""
+                if _corrupt(stderr_txt):
+                    return False, False, _encode_fail_reason(rc, stderr_txt, outp, min_kb, "file loi/hong")
+                last_err = f"fast loi (rc={rc})"
+                if os.path.exists(outp):
                     try: os.remove(outp)
                     except: pass
+            else:
+                last_err = "can drawtext dong"
 
     # Lop 2: drawtext + NVENC
     cmd = build_video_cmd(cfg, inp, outp, fc, trim, dur_limit, norm_audio=norm_a)
@@ -1684,6 +1919,22 @@ class Api:
         has_logo = os.path.isfile(cfg.get("logo_image",""))
         chk("Logo PNG", has_logo, cfg.get("logo_image","") if has_logo else "Không tìm thấy — fast mode sẽ không có logo")
 
+        if _gpu_direct:
+            chk("GPU Direct (PyNvVideoCodec)", GPU_DIRECT_OK,
+                _gpu_direct.capability_info() if GPU_DIRECT_OK else "pip install PyNvVideoCodec")
+        try:
+            from ram_temp import scan_ram_volumes, _find_imdisk
+            rams = scan_ram_volumes()
+            imd = _find_imdisk()
+            if rams:
+                chk("RAM disk", True, f"{rams[0][0]} ({rams[0][2]})")
+            elif imd:
+                chk("RAM disk", False, "Chua co o RAM — co ImDisk, can chay Admin de tu tao")
+            else:
+                chk("RAM disk", False, "Khong co RAM disk / ImDisk — RAM mode se LOI")
+        except ImportError:
+            pass
+
         # 4. NVENC hoat dong (encode 1s video test)
         import tempfile as _tmp
         test_out = os.path.join(_tmp.gettempdir(), "_wm_bench_nvenc.mp4")
@@ -1715,7 +1966,8 @@ class Api:
                 cfg_test = dict(cfg)
                 cfg_test["gpu_workers"] = 1
                 t0 = time.time()
-                cmd_ovl = build_fast_cmd(cfg_test, test_src, test_ovl, None)
+                cmd_ovl = build_fast_cmd(cfg_test, test_src, test_ovl, None,
+                                         video_w=1280, video_h=720)
                 rc, stderr = _run_ffmpeg(cmd_ovl, timeout=20)
                 elapsed = time.time() - t0
                 if rc == 0 and os.path.exists(test_ovl) and os.path.getsize(test_ovl) > 1000:
@@ -1787,13 +2039,24 @@ class Api:
     def kill_ffmpeg(self):
         """Kill toan bo process ffmpeg.exe dang chay (Windows)."""
         try:
-            import subprocess as _sp
-            _sp.Popen(["taskkill", "/F", "/IM", "ffmpeg.exe"],
-                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                      creationflags=CREATE_NO_WINDOW)
+            _kill_ffmpeg_processes()
             return {"ok": True, "msg": "💀 Đã gửi lệnh kill ffmpeg.exe"}
         except Exception as e:
             return {"ok": False, "msg": f"Kill lỗi: {e}"}
+
+    def cleanup_resources(self):
+        """Don temp + ffmpeg con sot (sau crash hoac thu cong)."""
+        _kill_ffmpeg_processes()
+        n = cleanup_work_dirs(include_ssd=True)
+        _clear_ram_temp_cache()
+        try:
+            from wm_overlay import clear_overlay_cache
+            clear_overlay_cache()
+        except Exception:
+            pass
+        gc.collect()
+        return {"ok": True, "removed": n,
+                "msg": f"Đã dọn {n} temp + kill ffmpeg (ImDisk R: vẫn giữ 8GB — đó là bình thường)"}
 
     def pick_logo(self):
         r = _window.create_file_dialog(webview.OPEN_DIALOG, file_types=('PNG (*.png)',))
@@ -2058,6 +2321,33 @@ class Api:
         ok, err = create_outro_video(cfg, 1280, 720, 30.0, out)
         return {"ok": ok, "path": out if ok else "", "msg": err}
 
+    def check_ram_status(self, config_json=None):
+        """API: kiem tra RAM disk cho UI / truoc khi chay."""
+        cfg = {**DEFAULT_CONFIG}
+        if config_json:
+            try:
+                cfg.update(json.loads(config_json))
+            except Exception:
+                pass
+        try:
+            from ram_temp import get_ram_status
+            st = get_ram_status(cfg, probe_create=False)
+        except ImportError:
+            st = {"ok": False, "available": False, "message": "Thieu ram_temp.py", "hint": ""}
+        return st
+
+    def open_external_url(self, url):
+        """Mo link trong trinh duyet (vd. tai ImDisk)."""
+        url = (url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return {"ok": False, "msg": "URL khong hop le"}
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+
     def start_process(self, config_json):
         global _running
         if _running:
@@ -2070,13 +2360,7 @@ class Api:
 
     def cancel_process(self):
         _cancel_flag.set()
-        # Kill tat ca ffmpeg ngay lap tuc (khong cho file hien tai chay xong)
-        try:
-            subprocess.Popen(["taskkill", "/F", "/IM", "ffmpeg.exe"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=CREATE_NO_WINDOW)
-        except Exception:
-            pass
+        _kill_ffmpeg_processes()
         return {"ok": True}
 
     def _emit(self, event, data):
@@ -2089,8 +2373,15 @@ class Api:
         global _running
         try:
             self._run(cfg)
+        except Exception as e:
+            self._emit("log", {"cls": "err", "msg": f"Loi batch: {e}"})
         finally:
             _running = False
+            try:
+                cleanup_work_dirs(cfg, include_ssd=True)
+            except Exception:
+                pass
+            gc.collect()
 
     def _run(self, cfg):
         ff        = cfg["ffmpeg_path"]
@@ -2108,6 +2399,12 @@ class Api:
         gpu_workers = int(cfg.get("gpu_workers", cfg.get("max_workers", 2)) or 0)
         cpu_workers = int(cfg.get("cpu_workers", 0) or 0)
         if gpu_workers <= 0 and cpu_workers <= 0:
+            gpu_workers = 1
+
+        eng = (cfg.get("encode_engine") or "auto").lower()
+        if eng in ("gpu_direct", "auto") and GPU_DIRECT_OK and gpu_workers > 1:
+            self._emit("log", {"cls": "warn",
+                "msg": "⚠ GPU Direct: chi 1 file/luc (tranh het RAM/OOM) — gpu_workers 2→1"})
             gpu_workers = 1
 
         # v7: nvenc_sessions = gpu_workers (UI da gop 2 thanh 1)
@@ -2216,17 +2513,47 @@ class Api:
                 "msg": f"  ⬆ Prefix [{prefix}] xong {expect} file — up {len(ready)} file ngay..."})
             _do_upload_chunks(split_chunks(ready, album_max), f"[{prefix}]")
 
-        # Thu muc temp render: neu user tro vao RAM disk (vd R:\) thi dung,
-        # khong thi None = temp he thong mac dinh (SSD).
+        # --- Kiem tra RAM: chi log khi bat RAM mode hoac da co RAM disk ---
+        try:
+            from ram_temp import get_ram_status, IMDISK_DOWNLOAD_URL
+            _ram_on = bool(cfg.get("ram_upload"))
+            _rs = get_ram_status(cfg, probe_create=_ram_on)
+            if _rs.get("available"):
+                self._emit("log", {"cls": "ok",
+                    "msg": f"💾 RAM: {_rs.get('message', 'OK')}"})
+            elif _ram_on:
+                self._emit("log", {"cls": "warn",
+                    "msg": f"💾 RAM: {_rs.get('message', 'Khong co')}"})
+                if _rs.get("hint"):
+                    self._emit("log", {"cls": "info", "msg": f"   → {_rs['hint']}"})
+                if not _rs.get("imdisk"):
+                    self._emit("log", {"cls": "info",
+                        "msg": f"   → Tai ImDisk: {IMDISK_DOWNLOAD_URL}"})
+        except ImportError:
+            if cfg.get("ram_upload"):
+                self._emit("log", {"cls": "warn", "msg": "💾 RAM: khong kiem tra duoc (thieu ram_temp.py)"})
+
+        # Thu muc temp: bat buoc RAM khi ram_upload
         _tmp_base = None
-        td = (cfg.get("temp_dir") or "").strip()
-        if td:
-            if os.path.isdir(td):
+        _ram_temp_label = ""
+        if cfg.get("ram_upload"):
+            _tmp_base, _ram_temp_label = resolve_temp_base(cfg, ram_mode=True)
+            if not _tmp_base:
+                self._emit("log", {"cls": "err", "msg": f"✗ RAM mode BAT BUOC: {_ram_temp_label}"})
+                self._emit("log", {"cls": "err", "msg":
+                    "  → Tat 'RAM → Up → Xóa' HOAC cai ImDisk + Run as Administrator"})
+                self._emit("done", {"ok": 0, "err": 1, "total": 0})
+                return
+            self._emit("log", {"cls": "ok", "msg": f"💾 RAM mode BAT: {_ram_temp_label}"})
+        else:
+            td = (cfg.get("temp_dir") or "").strip()
+            if td and os.path.isdir(td):
                 _tmp_base = td
-                self._emit("log", {"cls":"info","msg":f"Temp render: {td}"})
-            else:
-                self._emit("log", {"cls":"warn",
-                    "msg":f"Temp '{td}' khong ton tai -> dung temp he thong"})
+                self._emit("log", {"cls": "info", "msg": f"Temp render: {td}"})
+            elif td:
+                self._emit("log", {"cls": "warn",
+                    "msg": f"Temp '{td}' khong ton tai -> tu dong chon temp he thong"})
+                _tmp_base, _ram_temp_label = resolve_temp_base(cfg, ram_mode=False)
 
         errors = []
         if not os.path.isfile(ff):
@@ -2310,20 +2637,31 @@ class Api:
             self._emit("done", {"ok": 0, "err": 0, "total": 0})
             return
 
-        global _outro_cache, _ffmpeg_log_lines, _upload_log_lines
+        global _outro_cache, _center_png_cache, _text_png_cache, _ffmpeg_log_lines, _upload_log_lines
         _outro_cache      = {}
+        _center_png_cache = {}
+        _text_png_cache   = {}
         _ffmpeg_log_lines = []
         _upload_log_lines = []
+        _clear_ram_temp_cache()
         if tg_on:
             _emit_upload(f"=== Auto upload BAT → {cfg.get('tg_target')} ===")
 
         dynamic = _has_dynamic_wm(cfg)
         cfg["_fast_ok"] = True
+        eng = (cfg.get("encode_engine") or "auto").lower()
         if not dynamic:
-            self._emit("log", {"cls":"info","msg":"Dang kiem tra NVENC…"})
-            if fast_cuda_supported(cfg):
+            self._emit("log", {"cls":"info","msg":"Dang kiem tra engine…"})
+            if eng in ("gpu_direct", "auto") and GPU_DIRECT_OK and _gpu_direct:
                 self._emit("log", {"cls":"ok","msg":
-                    "✓ NVENC OK — pipeline: NVDEC decode + overlay CPU + NVENC encode 🚀"})
+                    f"⚡ GPU Direct BAT — {_gpu_direct.capability_info()}"})
+            elif eng == "gpu_direct":
+                self._emit("log", {"cls":"warn","msg":
+                    "GPU Direct thieu PyNvVideoCodec → se fallback FFmpeg Turbo"})
+            if fast_cuda_supported(cfg):
+                turbo = " + NVDEC" if cfg.get("turbo_nvdec", True) else ""
+                self._emit("log", {"cls":"ok","msg":
+                    f"✓ FFmpeg Turbo san sang (fallback){turbo}"})
             else:
                 cfg["_fast_ok"] = False
                 self._emit("log", {"cls":"warn","msg":
@@ -2340,10 +2678,18 @@ class Api:
                 "logo " + (f"AUTO {int(ratio*100)}% (>{int(thr)}s)" if thr > 0 else "FULL")]
         if parts > 1:               info.append(f"VA Pro {parts} phan")
         if not dynamic:
-            info.append("🚀 overlay_cuda")
+            if eng == "gpu_direct" and GPU_DIRECT_OK:
+                info.append("⚡ GPU Direct")
+            else:
+                info.append("🚀 Turbo overlay_cuda")
         else:
             info.append("✨ WM dong (HS preset)")
         if cfg.get("enable_outro"): info.append("🎬 outro")
+        if cfg.get("ram_upload"):   info.append("💾 RAM→Up→Xoa")
+        if cfg.get("ram_upload") and _ram_temp_label:
+            if not auto_up:
+                self._emit("log", {"cls": "warn",
+                    "msg": "RAM mode: nen bat Auto upload — file temp se xoa sau khi up"})
         self._emit("log", {"cls": "info", "msg": " | ".join(info)})
 
         # --- Trang thai dung chung giua cac luong ---
@@ -2380,81 +2726,98 @@ class Api:
                 if success: produced.append(outp)
                 mode    = "anh"
             else:
-                duration   = _get_duration(ffprobe_p, inp)
-                tmp_dir    = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
-                # Render thang ra out_dir, file temp chi dung cho concat_outro.
-                dest_dir   = out_dir
-                outp_final = os.path.join(dest_dir, name + suffix + ".mp4")
+                duration    = _get_duration(ffprobe_p, inp)
                 fail_reason = ""
-                # Canh bao som neu khong probe duoc duration (file loi/path xau)
-                if duration is None:
-                    fail_reason = "ffprobe khong doc duoc (file loi hoac path co ky tu la)"
-                try:
-                    def _do_part(p_start, p_limit, p_outp):
-                        nonlocal fail_reason
-                        cut = None
-                        if thr > 0 and duration and duration > thr:
-                            raw = (p_limit or (duration - (p_start or 0))) * ratio
-                            cut = round(raw, 2)
-                        fc_p   = build_filter_complex(cfg, is_img=False, cut=cut)
-                        wm_tmp = (os.path.join(tmp_dir, f"wm_{abs(hash(p_outp))}.mp4")
-                                  if cfg.get("enable_outro") else p_outp)
-                        s, fast, reason = encode_segment(cfg, ffprobe_p, inp, wm_tmp, fc_p,
-                                                         p_start, p_limit, use_gpu=use_gpu)
-                        if not s and reason:
-                            fail_reason = reason
-                        tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
-                        if s and cfg.get("enable_outro"):
-                            s2, emsg = concat_outro(ff, ffprobe_p, wm_tmp, p_outp, cfg, tmp_dir)
-                            if not s2:
-                                with lock:
-                                    self._emit("log", {"cls":"warn","msg":f"  Outro loi: {emsg} -> dung ban khong outro"})
-                                try: shutil.copy2(wm_tmp, p_outp)
-                                except Exception as ce: fail_reason = f"copy fallback loi: {ce}"
-                            s   = _is_valid(p_outp, min_kb)
-                            if not s and not fail_reason:
-                                fail_reason = "sau outro: output khong hop le"
-                            tag += " +outro" if s else ""
-                        # --- Auto upload Telegram (neu bat) ---
-                        # File output da xong (dang o out_dir). Ghi nhan de auto up.
-                        if s:
-                            produced.append(p_outp)
-                        return s, tag
+                dest_dir    = out_dir
+                outp_final  = os.path.join(out_dir, name + suffix + ".mp4")
+                tmp_dir     = None
 
-                    if parts > 1 and duration:
-                        avail    = max(0.0, float(duration) - float(trim))
-                        n_parts  = max(1, int(avail)) if avail < parts else parts
-                        part_len = avail / n_parts
-                        ok_p     = 0
-                        for i in range(1, n_parts + 1):
-                            p_start = trim + (i-1) * part_len
-                            p_limit = part_len if i < n_parts else None
-                            p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
-                            s, _    = _do_part(p_start, p_limit, p_outp)
-                            if s: ok_p += 1
-                        success = ok_p == n_parts
-                        mode    = f"VA Pro {n_parts}p ({ok_p} OK)"
+                if cfg.get("ram_upload"):
+                    dest_dir, _rd = resolve_temp_base(cfg, ram_mode=True)
+                    if not dest_dir:
+                        success = False
+                        mode = _rd or RAM_REQUIRED_MSG
                     else:
-                        success, tag = _do_part(trim if trim else None, None, outp_final)
-                        cut_info = ""
-                        if thr > 0 and duration and duration > thr:
-                            cut      = round((duration - (trim or 0)) * ratio, 2)
-                            cut_info = f" logo {int(ratio*100)}% ({cut:.0f}s)"
-                        mode = (f"{duration:.0f}s" if duration else "?") + cut_info + tag
+                        outp_final = os.path.join(dest_dir, name + suffix + ".mp4")
+                        tmp_dir = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base or dest_dir)
+                else:
+                    tmp_dir = tempfile.mkdtemp(prefix="gpu_wm_", dir=_tmp_base)
 
-                    if not success and fail_reason:
-                        mode = (mode + f" | {fail_reason}") if mode else fail_reason
+                if cfg.get("ram_upload") and not dest_dir:
+                    success = False
+                    mode = mode or RAM_REQUIRED_MSG
+                elif duration is None:
+                    success = False
+                    mode = "ffprobe khong doc duoc duration"
+                else:
+                    try:
+                        def _do_part(p_start, p_limit, p_outp):
+                            nonlocal fail_reason
+                            cut = None
+                            if thr > 0 and duration and duration > thr:
+                                raw = (p_limit or (duration - (p_start or 0))) * ratio
+                                cut = round(raw, 2)
+                            fc_p   = build_filter_complex(cfg, is_img=False, cut=cut)
+                            wm_tmp = (os.path.join(tmp_dir, f"wm_{abs(hash(p_outp))}.mp4")
+                                      if cfg.get("enable_outro") else p_outp)
+                            s, fast, reason = encode_segment(cfg, ffprobe_p, inp, wm_tmp, fc_p,
+                                                             p_start, p_limit, use_gpu=use_gpu)
+                            enc_engine = reason if reason == "gpu_direct" else ""
+                            if not s and reason and reason != "gpu_direct":
+                                fail_reason = reason
+                            if enc_engine == "gpu_direct":
+                                tag = " [⚡direct]"
+                            else:
+                                tag = " [⚡fast]" if fast else (" [x264]" if not use_gpu else "")
+                            if s and cfg.get("enable_outro"):
+                                s2, emsg = concat_outro(ff, ffprobe_p, wm_tmp, p_outp, cfg, tmp_dir)
+                                if not s2:
+                                    with lock:
+                                        self._emit("log", {"cls":"warn","msg":f"  Outro loi: {emsg} -> dung ban khong outro"})
+                                    try: shutil.copy2(wm_tmp, p_outp)
+                                    except Exception as ce: fail_reason = f"copy fallback loi: {ce}"
+                                s   = _is_valid(p_outp, min_kb)
+                                if not s and not fail_reason:
+                                    fail_reason = "sau outro: output khong hop le"
+                                tag += " +outro" if s else ""
+                            if s:
+                                produced.append(p_outp)
+                            return s, tag
 
-                    if not success:
-                        # Don file output loi (chi trong out_dir; temp se bi xoa o finally)
-                        for f2 in ([os.path.join(out_dir, name + suffix + ".mp4")] +
-                                   [os.path.join(out_dir, f"{name}_part{i:02d}{suffix}.mp4")
-                                    for i in range(1, parts+1)]):
-                            if os.path.exists(f2):
-                                try: os.remove(f2)
-                                except: pass
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                        if parts > 1 and duration:
+                            avail    = max(0.0, float(duration) - float(trim))
+                            n_parts  = max(1, int(avail)) if avail < parts else parts
+                            part_len = avail / n_parts
+                            ok_p     = 0
+                            for i in range(1, n_parts + 1):
+                                p_start = trim + (i-1) * part_len
+                                p_limit = part_len if i < n_parts else None
+                                p_outp  = os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
+                                s, _    = _do_part(p_start, p_limit, p_outp)
+                                if s: ok_p += 1
+                            success = ok_p == n_parts
+                            mode    = f"VA Pro {n_parts}p ({ok_p} OK)"
+                        else:
+                            success, tag = _do_part(trim if trim else None, None, outp_final)
+                            cut_info = ""
+                            if thr > 0 and duration and duration > thr:
+                                cut      = round((duration - (trim or 0)) * ratio, 2)
+                                cut_info = f" logo {int(ratio*100)}% ({cut:.0f}s)"
+                            mode = (f"{duration:.0f}s" if duration else "?") + cut_info + tag
+
+                        if not success and fail_reason:
+                            mode = (mode + f" | {fail_reason}") if mode else fail_reason
+
+                        if not success:
+                            for f2 in ([os.path.join(dest_dir, name + suffix + ".mp4")] +
+                                       [os.path.join(dest_dir, f"{name}_part{i:02d}{suffix}.mp4")
+                                        for i in range(1, parts+1)]):
+                                if os.path.exists(f2):
+                                    try: os.remove(f2)
+                                    except: pass
+                    finally:
+                        if tmp_dir:
+                            shutil.rmtree(tmp_dir, ignore_errors=True)
 
             enc_t = time.time() - t0
             # Speed THAT: ti le so voi realtime (giong ffmpeg). Anh khong co duration.
@@ -2501,6 +2864,14 @@ class Api:
                                 if ok_up:
                                     self._emit("log", {"cls":"ok",
                                         "msg":f"  ⬆ Da day vao Telegram: {os.path.basename(f1)}"})
+                                    if cfg.get("ram_upload") and cfg.get("delete_after_upload"):
+                                        try:
+                                            os.remove(f1)
+                                            self._emit("log", {"cls":"info",
+                                                "msg":f"  🗑 Da xoa temp RAM (khong luu SSD): {os.path.basename(f1)}"})
+                                        except OSError as de:
+                                            self._emit("log", {"cls":"warn",
+                                                "msg":f"  Khong xoa duoc temp: {de}"})
                                 else:
                                     self._emit("log", {"cls":"err",
                                         "msg":f"  ⬆ Up loi: {msg_up[:80]} — file van o Output"})
@@ -2614,6 +2985,8 @@ class Api:
 
 def main():
     global _window
+    _startup_cleanup()
+    atexit.register(_shutdown_cleanup)
     _window = webview.create_window(
         title="GPU Watermark Studio v12",
         html=_load_ui(),
@@ -2623,6 +2996,7 @@ def main():
         background_color="#090b10",
     )
     webview.start(debug=False)
+    _shutdown_cleanup()
 
 if __name__ == "__main__":
     main()
